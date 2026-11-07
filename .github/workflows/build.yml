@@ -1,0 +1,93 @@
+name: build
+
+on:
+  push:
+    branches: [main, master]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  host-test:
+    name: host build + roundtrip test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install deps
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake g++ zlib1g-dev
+
+      - name: Configure
+        run: cmake -S . -B build-host -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build-host -j"$(nproc)"
+
+      - name: Roundtrip test
+        run: ./build-host/ozj-appdata-test
+
+      - name: CLI smoke
+        run: |
+          ./build-host/ozj-appdata --version
+          ./build-host/ozj-appdata --help | head -5
+
+  android:
+    name: android ${{ matrix.abi }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - abi: arm64-v8a
+            api: 21
+          - abi: armeabi-v7a
+            api: 21
+          - abi: x86_64
+            api: 21
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup NDK
+        id: ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - name: Configure
+        env:
+          NDK: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          cmake -S . -B build-${{ matrix.abi }} \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=${{ matrix.abi }} \
+            -DANDROID_PLATFORM=android-${{ matrix.api }} \
+            -DANDROID_STL=c++_static \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DOZJ_BUILD_TESTS=OFF
+
+      - name: Build
+        run: cmake --build build-${{ matrix.abi }} -j"$(nproc)"
+
+      - name: Strip
+        env:
+          NDK: ${{ steps.ndk.outputs.ndk-path }}
+        run: |
+          "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
+            build-${{ matrix.abi }}/ozj-appdata
+          ls -lh build-${{ matrix.abi }}/ozj-appdata
+          file build-${{ matrix.abi }}/ozj-appdata
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp build-${{ matrix.abi }}/ozj-appdata dist/ozj-appdata-${{ matrix.abi }}
+          cd dist && zip -9 "ozj-appdata-${{ matrix.abi }}.zip" "ozj-appdata-${{ matrix.abi }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ozj-appdata-${{ matrix.abi }}
+          path: dist/ozj-appdata-${{ matrix.abi }}.zip
+          if-no-files-found: error
