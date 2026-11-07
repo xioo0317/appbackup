@@ -85,7 +85,11 @@ bool zstd_supports_priority_rt() {
 // 与不含它们时输出字节完全相同（见 README 的字节级验证），保留不影响与上游互通。
 std::string zstd_cmd(int level, int threads, bool with_priority) {
     if (threads < 0) threads = 0;
-    std::string c = sh_quote(toolchain::zstd()) + " -r -T" + std::to_string(threads) + " --ultra -q";
+    // 与 custom fork ModelUtil.getCompressPara 逐字对齐：--ultra 只在 level >= 20 时拼上。
+    // zstd 的 --ultra 仅对 20~22 生效，1~19 加了是冗余；实测 level=1 输出字节完全相同。
+    std::string c = sh_quote(toolchain::zstd()) + " -r -T" + std::to_string(threads);
+    if (level >= 20) c += " --ultra";
+    c += " -q";
     if (with_priority && zstd_supports_priority_rt()) c += " --priority=rt";
     c += " -" + std::to_string(level);
     return c;

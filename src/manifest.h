@@ -19,10 +19,10 @@ namespace appbackup {
 // 这是一份「参数指纹」：源清单 hash + 打包参数全一致才跳过重打（manifest_params_equal）。
 // 因此 threads/level/follow/excl 变化时也会触发全量重打，不是单纯的展示字段。
 //
-// threads 的来源：上游 zstd 命令是 `-T0`（0=自动用全部核心），所以这里的 2 并不是
-// 传给 zstd 的 -T 值，而是该版本记入清单的一个压缩/任务参数（样本与用户模板普遍为 2）。
-// 开源 main 分支没有生成 .manifest 的代码，故以样本为 ground truth；不同设备/设置/版本
-// 可能取别的值，故做成可配置（--threads），默认 2 与样本对齐。
+// threads 的来源：实际参照的 custom fork 中 readCompressionThreads()（defValue = 2），
+// 经 CompressionType.getCompressPara() 同时写进 zstd 的 -T<threads> 和本清单的参数指纹。
+// 官方 main 分支用 -T0、且不带 .manifest；本项目以 custom fork 源码 + 备份样本为准。
+// 用户可在设置里改、不同版本默认值也可能不同，故做成可配置（--threads），默认 2。
 struct ManifestParams {
     std::string ct;   // TAR / ZSTD / LZ4
     int level = 1;
