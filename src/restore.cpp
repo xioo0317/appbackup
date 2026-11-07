@@ -160,54 +160,101 @@ bool install_split_apks(const std::vector<std::string>& apks, int user) {
     return ok;
 }
 
-bool install_apk_from(const std::string& in_dir, const BackupMeta& meta, int user) {
-    bool any = false;
-    for (const auto& e : meta.entries) {
-        if (e.type != kDataTypeApk || !e.exists || e.archive.empty()) continue;
-        std::string archive = join_path(in_dir, e.archive);
-        if (!path_exists(archive)) continue;
+// 找 APK 归档，返回完整路径。上游标准名是 apk.tar.zst（同时兼容 .tar.gz/.tar/.tar.lz4）。
+// 找不到时依次：
+//   1) 从同应用目录下其它 user_* 版本（@preserveId 归档）借用一份，与上游 tryReuse 语义一致；
+//   2) 把「查过哪些文件名、目录里实际有什么」写进 why，避免只报一句含糊的「没有可用的 apk 归档」。
+std::string locate_apk_archive(const std::string& in_dir, std::string* why) {
+    static const char* kSuffixes[] = {".tar.zst", ".tar.gz", ".tar", ".tar.lz4"};
+    std::vector<std::string> tried;
+    for (const char* s : kSuffixes) {
+        std::string name = std::string("apk") + s;
+        tried.push_back(name);
+        std::string p = join_path(in_dir, name);
+        if (path_exists(p)) return p;
+    }
 
-        std::string tmp = strfmt("/data/local/tmp/appbackup_apk_%d", static_cast<int>(getpid()));
-        run_shell("rm -rf '" + tmp + "'");
-        make_dirs(tmp, 0755);
-
-        // 用系统 tar 解包（与上游 zstd -d -c | tar 一致，不手写）
-        SysRestoreOpt ropt;
-        ropt.src = archive;
-        ropt.dstDir = tmp;
-        if (!sys_restore(ropt)) {
-            log_error("cannot extract apk archive: %s", archive.c_str());
-            run_shell("rm -rf '" + tmp + "'");
-            continue;
-        }
-
-        std::vector<std::string> apks;
-        collect_apks(tmp, &apks);
-        if (apks.empty()) {
-            log_error("no apk found in %s", archive.c_str());
-            run_shell("rm -rf '" + tmp + "'");
-            continue;
-        }
-        // base.apk 排最前，其余按名字稳定排序
-        std::sort(apks.begin(), apks.end());
-        for (auto it = apks.begin(); it != apks.end(); ++it) {
-            if (basename_of(*it) == "base.apk") {
-                std::iter_swap(apks.begin(), it);
-                break;
+    std::string parent = dirname_of(in_dir);
+    std::string self = basename_of(in_dir);
+    if (!parent.empty() && is_directory(parent)) {
+        for (const auto& v : list_dir(parent)) {
+            if (!starts_with(v, "user_") || v == self) continue;
+            std::string dir = join_path(parent, v);
+            if (!is_directory(dir)) continue;
+            for (const char* s : kSuffixes) {
+                std::string p = join_path(dir, std::string("apk") + s);
+                if (path_exists(p)) {
+                    if (why)
+                        *why = strfmt("本目录无 APK 归档，已从同应用的 %s 借用 %s", v.c_str(),
+                                      basename_of(p).c_str());
+                    return p;
+                }
             }
         }
-
-        log_info("installing %zu apk(s) from %s", apks.size(), e.archive.c_str());
-        bool ok = apks.size() == 1 ? install_single_apk(apks[0], user) : install_split_apks(apks, user);
-        if (ok) {
-            any = true;
-        } else {
-            log_error("install failed for %s", e.archive.c_str());
-        }
-        run_shell("rm -rf '" + tmp + "'");
     }
-    if (any) usleep(500 * 1000);
-    return any;
+
+    std::string msg = "在 " + in_dir + " 未找到 APK 归档（已尝试 ";
+    for (size_t i = 0; i < tried.size(); ++i) {
+        if (i) msg += " / ";
+        msg += tried[i];
+    }
+    msg += "）";
+    std::vector<std::string> apk_named;
+    for (const auto& n : list_dir(in_dir)) {
+        if (starts_with(n, "apk")) apk_named.push_back(n);
+    }
+    if (!apk_named.empty()) {
+        msg += "；目录里 apk 开头的文件有：";
+        for (size_t i = 0; i < apk_named.size(); ++i) {
+            if (i) msg += ", ";
+            msg += apk_named[i];
+        }
+        msg += "（若是 .part，说明上次备份中断，需重打或改名）";
+    } else {
+        msg += "；该目录没有任何 apk 开头的文件";
+    }
+    msg += "。--in 需指向含 apk.tar.zst 与 package_restore_config.json 的完整备份目录。";
+    if (why) *why = msg;
+    return std::string();
+}
+
+// 从 APK 归档解包并安装。上游归档内是 ./base.apk、./split_*.apk（flat 结构），
+// 解到临时目录再递归收 *.apk 即可；归档可以来自借用的版本目录，不要求在本目录内。
+bool install_apk_archive(const std::string& archive, int user) {
+    std::string tmp = strfmt("/data/local/tmp/appbackup_apk_%d", static_cast<int>(getpid()));
+    run_shell("rm -rf '" + tmp + "'");
+    make_dirs(tmp, 0755);
+
+    SysRestoreOpt ropt;
+    ropt.src = archive;
+    ropt.dstDir = tmp;
+    if (!sys_restore(ropt)) {
+        log_error("无法解开 APK 归档: %s", archive.c_str());
+        run_shell("rm -rf '" + tmp + "'");
+        return false;
+    }
+
+    std::vector<std::string> apks;
+    collect_apks(tmp, &apks);
+    if (apks.empty()) {
+        log_error("%s 里没有找到 .apk 文件", archive.c_str());
+        run_shell("rm -rf '" + tmp + "'");
+        return false;
+    }
+    std::sort(apks.begin(), apks.end());
+    for (auto it = apks.begin(); it != apks.end(); ++it) {
+        if (basename_of(*it) == "base.apk") {
+            std::iter_swap(apks.begin(), it);
+            break;
+        }
+    }
+
+    log_info("安装 %zu 个 apk：%s", apks.size(), archive.c_str());
+    bool ok = apks.size() == 1 ? install_single_apk(apks[0], user) : install_split_apks(apks, user);
+    if (!ok) log_error("安装失败: %s", archive.c_str());
+    run_shell("rm -rf '" + tmp + "'");
+    if (ok) usleep(500 * 1000);
+    return ok;
 }
 
 // 与上游 PackagesRestoreUtil.restorePermissions 对齐：
@@ -497,17 +544,12 @@ int run_restore(const RestoreOptions& opt) {
     int uid = uid_for_package(pkg, user, 1, 0);
     bool installed = uid > 0;
 
-    bool apk_available = false;
-    std::string apk_archive;
-    for (const auto& e : meta.entries) {
-        if (e.type != kDataTypeApk || !e.exists || e.archive.empty()) continue;
-        std::string p = join_path(in_dir, e.archive);
-        if (path_exists(p)) {
-            apk_available = true;
-            apk_archive = p;
-            break;
-        }
-    }
+    // 直接按磁盘实际文件定位，不再只信 meta.entries：归档可能被移动、改名或
+    // 只留在同应用的 @preserveId 版本目录里（上游 preserve 机制常见）。
+    std::string apk_note;
+    std::string apk_archive = locate_apk_archive(in_dir, &apk_note);
+    bool apk_available = !apk_archive.empty();
+    if (apk_available && !apk_note.empty()) log_info("%s", apk_note.c_str());
 
     const bool need_install = opt.install_apk && (!installed || opt.force_reinstall);
     if (need_install) {
@@ -518,7 +560,7 @@ int run_restore(const RestoreOptions& opt) {
         }
         if (!apk_available) {
             log_warn("备份里没有可用的 apk 归档，跳过安装步骤");
-        } else if (!install_apk_from(in_dir, meta, user)) {
+        } else if (!install_apk_archive(apk_archive, user)) {
             log_error("APK 安装失败: %s", apk_archive.c_str());
         } else {
             // 安装后 uid 可能延迟可见，重新解析
@@ -533,6 +575,7 @@ int run_restore(const RestoreOptions& opt) {
             if (!apk_available) {
                 log_error("%s 未安装，且备份中没有 apk 归档；请先在设备上安装该应用（或补齐 apk 备份）后重试",
                           pkg.c_str());
+                if (!apk_note.empty()) log_error("%s", apk_note.c_str());
             } else if (!opt.install_apk) {
                 log_error("%s 未安装，且已用 --no-apk 禁用安装；去掉该参数即可从备份自动安装后恢复",
                           pkg.c_str());

@@ -25,7 +25,8 @@ struct DbFormatInfo {
     std::string pkg;
     int user = 0;
     int uid = -1;
-    std::string compression_type;   // TAR / ZSTD / LZ4
+    // TAR / ZSTD / LZ4。上游默认 ZSTD；config 缺失时保持该默认值，避免恢复日志出现空的 ct=。
+    std::string compression_type = "ZSTD";
     long long preserve_id = 0;
     std::string label;
     std::string version_name;
