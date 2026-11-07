@@ -1,4 +1,4 @@
-// ozj-appdata —— 应用数据打包/恢复工具（C++17，root）
+// appbackup —— 应用数据打包/恢复工具（C++17，root）
 #pragma once
 
 #include <cstdarg>
@@ -8,10 +8,10 @@
 #include <string>
 #include <vector>
 
-namespace ozj {
+namespace appbackup {
 
-constexpr const char* kToolName = "ozj-appdata";
-constexpr const char* kToolVersion = "1.2.0";
+constexpr const char* kToolName = "appbackup";
+constexpr const char* kToolVersion = "2.0.0";
 
 // 全局日志级别：0=quiet 1=normal 2=verbose
 extern int g_log_level;
@@ -39,4 +39,4 @@ std::string human_size(uint64_t bytes);
 // 当前时间 ISO8601（本地时区）
 std::string now_iso8601();
 
-}  // namespace ozj
+}  // namespace appbackup

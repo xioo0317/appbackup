@@ -6,7 +6,7 @@
 #include "meta.h"
 #include "sink.h"
 
-namespace ozj {
+namespace appbackup {
 
 enum class KillMode { None, Am, Kill };
 
@@ -25,4 +25,4 @@ struct BackupOptions {
 // 返回进程退出码：0 成功
 int run_backup(const BackupOptions& opt);
 
-}  // namespace ozj
+}  // namespace appbackup

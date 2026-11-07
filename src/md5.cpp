@@ -6,7 +6,7 @@
 #include <cstring>
 #include <vector>
 
-namespace ozj {
+namespace appbackup {
 
 namespace {
 
@@ -125,4 +125,4 @@ std::string md5_of_file(const std::string& path) {
     return md5.hex_digest();
 }
 
-}  // namespace ozj
+}  // namespace appbackup

@@ -5,13 +5,13 @@
 #include <cstdio>
 #include <cstring>
 
-#if defined(OZJ_HAS_ZSTD)
+#if defined(APP_HAS_ZSTD)
 #include <zstd.h>
 #endif
 
 #include "common.h"
 
-namespace ozj {
+namespace appbackup {
 
 namespace {
 
@@ -132,7 +132,7 @@ private:
     gzFile fp_ = nullptr;
 };
 
-#if defined(OZJ_HAS_ZSTD)
+#if defined(APP_HAS_ZSTD)
 class ZstdSink : public Sink {
 public:
     ZstdSink(const std::string& path, int level) : path_(path) {
@@ -270,7 +270,7 @@ private:
     size_t in_pos_ = 0;
     bool eof_ = false;
 };
-#endif  // OZJ_HAS_ZSTD
+#endif  // APP_HAS_ZSTD
 
 }  // namespace
 
@@ -323,7 +323,7 @@ std::unique_ptr<Source> open_gzip_source(const std::string& path) {
 }
 
 std::unique_ptr<Sink> open_zstd_sink(const std::string& path, int level) {
-#if defined(OZJ_HAS_ZSTD)
+#if defined(APP_HAS_ZSTD)
     return std::unique_ptr<Sink>(new ZstdSink(path, level));
 #else
     (void)path;
@@ -342,7 +342,7 @@ std::unique_ptr<Sink> open_sink(const std::string& path, Compression c, int leve
 }
 
 std::unique_ptr<Source> open_zstd_source(const std::string& path) {
-#if defined(OZJ_HAS_ZSTD)
+#if defined(APP_HAS_ZSTD)
     return std::unique_ptr<Source>(new ZstdSource(path));
 #else
     (void)path;
@@ -384,4 +384,4 @@ Compression detect_compression(const std::string& path) {
     return Compression::Plain;
 }
 
-}  // namespace ozj
+}  // namespace appbackup

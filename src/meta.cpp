@@ -7,7 +7,7 @@
 #include "common.h"
 #include "fsops.h"
 
-namespace ozj {
+namespace appbackup {
 
 const char* const kDataTypeUser = "user";
 const char* const kDataTypeUserDe = "user_de";
@@ -375,4 +375,4 @@ std::string json_get_string(const std::string& text, const std::string& key) {
     return text.substr(q1 + 1, q2 - q1 - 1);
 }
 
-}  // namespace ozj
+}  // namespace appbackup

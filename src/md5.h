@@ -3,7 +3,7 @@
 #include <cstdint>
 #include <string>
 
-namespace ozj {
+namespace appbackup {
 
 // 流式 MD5（备份完整性校验用，与 DataBackup 的 <归档>.md5 对齐）
 class Md5 {
@@ -26,4 +26,4 @@ private:
 // 计算整个文件的 MD5，失败返回空串
 std::string md5_of_file(const std::string& path);
 
-}  // namespace ozj
+}  // namespace appbackup

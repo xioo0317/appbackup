@@ -9,7 +9,7 @@
 #include "fsops.h"
 #include "proc.h"
 
-namespace ozj {
+namespace appbackup {
 
 namespace {
 
@@ -77,4 +77,4 @@ bool package_installed(const std::string& pkg, int user) {
     return uid_for_package(pkg, user, 1, 0) > 0;
 }
 
-}  // namespace ozj
+}  // namespace appbackup

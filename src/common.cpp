@@ -3,7 +3,7 @@
 #include <ctime>
 #include <cctype>
 
-namespace ozj {
+namespace appbackup {
 
 int g_log_level = 1;
 
@@ -105,4 +105,4 @@ std::string now_iso8601() {
     return std::string(buf);
 }
 
-}  // namespace ozj
+}  // namespace appbackup

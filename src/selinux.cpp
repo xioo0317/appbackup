@@ -13,7 +13,7 @@
 #include "fsops.h"
 #include "proc.h"
 
-namespace ozj {
+namespace appbackup {
 
 namespace {
 
@@ -123,4 +123,4 @@ std::string selinux_derive_app_context(const std::string& dir) {
     return ctx;
 }
 
-}  // namespace ozj
+}  // namespace appbackup

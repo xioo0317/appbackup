@@ -4,7 +4,7 @@
 
 #include <string>
 
-namespace ozj {
+namespace appbackup {
 
 // 查包在当前设备上的 uid（安装后由 PackageManager 分配）。
 // retries * delay_ms 用于等待刚 pm install 完的包被系统刷新出来，拿不到返回 -1。
@@ -19,4 +19,4 @@ std::string package_source_dir(const std::string& pkg, int user);
 // 包是否已安装
 bool package_installed(const std::string& pkg, int user);
 
-}  // namespace ozj
+}  // namespace appbackup

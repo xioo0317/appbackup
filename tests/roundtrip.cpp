@@ -20,7 +20,7 @@
 #include "tar_reader.h"
 #include "tar_writer.h"
 
-using namespace ozj;
+using namespace appbackup;
 
 static int g_fail = 0;
 
@@ -52,13 +52,13 @@ static void rm_rf(const std::string& path) { run_shell("rm -rf '" + path + "'");
 
 int main() {
     g_log_level = 1;
-    std::string base = "/tmp/ozj_rt_" + std::to_string(getpid());
+    std::string base = "/tmp/appbackup_rt_" + std::to_string(getpid());
     std::string src = base + "/src";
     std::string out = base + "/out";
     rm_rf(base);
 
     make_dirs(src + "/com.demo.app/sub/deep", 0755);
-    write_text(src + "/com.demo.app/a.txt", "hello ozj\n");
+    write_text(src + "/com.demo.app/a.txt", "hello appbackup\n");
     write_text(src + "/com.demo.app/sub/b.bin", std::string(5000, 'x'));
     write_text(src + "/com.demo.app/empty.dat", "");
     write_text(src + "/com.demo.app/cache/should_skip.txt", "cache");
@@ -109,7 +109,7 @@ int main() {
         bool ok = tar_extract(*s, eopt, &est);
         s->close();
         check(ok, "tar_extract plain");
-        check(read_all(out + "/com.demo.app/a.txt") == "hello ozj\n", "content roundtrip");
+        check(read_all(out + "/com.demo.app/a.txt") == "hello appbackup\n", "content roundtrip");
         check(read_all(out + "/com.demo.app/sub/b.bin").size() == 5000, "binary size roundtrip");
         check(read_all(out + "/com.demo.app/empty.dat").empty(), "empty file");
         check(path_exists(out + "/com.demo.app/" + std::string(60, 'd') + "/" + std::string(60, 'e') + "/" +
@@ -140,7 +140,7 @@ int main() {
         bool ok2 = s && tar_extract(*s, eopt, &est);
         if (s) s->close();
         check(ok2, "gzip unpack");
-        check(read_all(out2 + "/com.demo.app/a.txt") == "hello ozj\n", "gzip content roundtrip");
+        check(read_all(out2 + "/com.demo.app/a.txt") == "hello appbackup\n", "gzip content roundtrip");
 
         ExecResult r = run_shell("tar -tzf '" + gz + "' >/dev/null 2>&1");
         check(r.code == 0, "system tar can read our .tar.gz");
@@ -183,7 +183,7 @@ int main() {
         check(!path_exists(base + "/escape.txt"), "path traversal blocked (no ../escape.txt)");
     }
 
-#if defined(OZJ_HAS_ZSTD)
+#if defined(APP_HAS_ZSTD)
     // zstd 往返 + 与系统 zstd 互操作
     {
         std::string zst = base + "/t.tar.zst";
@@ -204,7 +204,7 @@ int main() {
         bool ok2 = s && tar_extract(*s, eopt, &est);
         if (s) s->close();
         check(ok2, "zstd unpack (auto detect)");
-        check(read_all(out4 + "/com.demo.app/a.txt") == "hello ozj\n", "zstd content roundtrip");
+        check(read_all(out4 + "/com.demo.app/a.txt") == "hello appbackup\n", "zstd content roundtrip");
 
         ExecResult has = run_shell("command -v zstd >/dev/null 2>&1");
         if (has.code == 0) {

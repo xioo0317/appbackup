@@ -14,7 +14,7 @@
 #include "fsops.h"
 #include "tar_writer.h"  // 复用 tar_path_excluded
 
-namespace ozj {
+namespace appbackup {
 
 namespace {
 
@@ -360,4 +360,4 @@ bool tar_extract(Source& src, const ExtractOptions& opt, ExtractStats* stats) {
     return true;
 }
 
-}  // namespace ozj
+}  // namespace appbackup

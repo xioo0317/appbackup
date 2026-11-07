@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace ozj {
+namespace appbackup {
 
 bool path_exists(const std::string& path);
 bool is_directory(const std::string& path);
@@ -34,4 +34,4 @@ std::vector<std::string> list_dir(const std::string& path);
 // 解析 /proc/self/... 之类不存在时返回空
 std::string read_file_head(const std::string& path, size_t max_len = 4096);
 
-}  // namespace ozj
+}  // namespace appbackup

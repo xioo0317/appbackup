@@ -1,4 +1,4 @@
-# ozj-appdata
+# appbackup
 
 Android 应用数据 **打包 / 恢复** 命令行工具（C++17，需 root）。
 
@@ -9,6 +9,11 @@ Android 应用数据 **打包 / 恢复** 命令行工具（C++17，需 root）�
 
 **与 DataBackup 双向兼容**：`--format databackup` 直接生成它认识的目录结构（含 `package_restore_config.json`
 与 `.md5`），它能识别并恢复；反过来，本工具也能直接恢复它生成的备份目录。
+
+> **v2.0.0 起项目更名为 `appbackup`**（原名 `ozj-appdata`）。可执行文件、CMake 工程名、命名空间、
+> 归档里 `meta.json` 的 `tool` 字段、CI 产物名统一改为 `appbackup`；`--format` 的默认值改为
+> `appbackup`，旧参数 `--format ozj` 仍然接受。备份目录结构没有变化，旧版本生成的备份可直接用
+> `appbackup restore` 恢复。
 
 ---
 
@@ -158,7 +163,7 @@ dex/oat 与 ABI 不匹配；`lib` 同理（原生库由 APK 安装时按目标 A
 
 ### 与上游的差异
 
-| 项 | DataBackup | ozj-appdata |
+| 项 | DataBackup | appbackup |
 | --- | --- | --- |
 | 形态 | Android App（Kotlin + Compose） | 单个 C++ 可执行文件（约 1 MB，静态链 zstd） |
 | tar | 调用系统 `tar` | 自己实现 ustar + pax 读写 |
@@ -177,7 +182,7 @@ dex/oat 与 ABI 不匹配；`lib` 同理（原生库由 APK 安装时按目标 A
 sudo apt install -y cmake g++ zlib1g-dev libzstd-dev zstd
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-./build/ozj-appdata-test
+./build/appbackup-test
 
 # Android（NDK r27+，zstd 用源码静态编进来）
 curl -sL https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz | tar xz -C /tmp
@@ -185,40 +190,40 @@ cmake -S . -B build-arm64 \
   -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-21 \
   -DANDROID_STL=c++_static -DCMAKE_BUILD_TYPE=Release \
-  -DOZJ_BUILD_TESTS=OFF -DOZJ_ZSTD_SRC=/tmp/zstd-1.5.6
+  -DAPP_BUILD_TESTS=OFF -DAPP_ZSTD_SRC=/tmp/zstd-1.5.6
 cmake --build build-arm64 -j
 ```
 
-`-DOZJ_WITH_ZSTD=OFF` 可关掉 zstd（体积更小，但读不了 `.tar.zst`）。
+`-DAPP_WITH_ZSTD=OFF` 可关掉 zstd（体积更小，但读不了 `.tar.zst`）。
 CI 会产出 `arm64-v8a` / `armeabi-v7a` / `x86_64` 三个 ABI 的 zip。
 
 ### 用法
 
 ```
-ozj-appdata backup  --pkg <包名> [--user 0] [--types user,user_de,data,obb,media,apk]
+appbackup backup  --pkg <包名> [--user 0] [--types user,user_de,data,obb,media,apk]
                     [--out DIR] [--compress zstd|gzip|none] [--kill none|am|kill]
-                    [--format ozj|databackup]
-ozj-appdata restore --in <备份目录> [--pkg <包名>] [--user 0] [--types ...]
+                    [--format appbackup|databackup]
+appbackup restore --in <备份目录> [--pkg <包名>] [--user 0] [--types ...]
                     [--clean] [--install-apk] [--no-selinux] [--no-verify]
                     [--no-checksum] [--force-checksum]
-ozj-appdata list    --in <备份目录> [--pkg <包名>]
-ozj-appdata info    --pkg <包名> [--user 0]
+appbackup list    --in <备份目录> [--pkg <包名>]
+appbackup info    --pkg <包名> [--user 0]
 ```
 
 #### 备份
 
 ```bash
 # 自有格式（默认 zstd）
-su -c './ozj-appdata backup --pkg com.tencent.mm --out /sdcard/ozj_backup --kill am'
+su -c './appbackup backup --pkg com.tencent.mm --out /sdcard/appbackup --kill am'
 
 # 直接写成 DataBackup 能识别的结构
-su -c './ozj-appdata backup --pkg com.tencent.mm --out /sdcard/DataBackup --format databackup'
+su -c './appbackup backup --pkg com.tencent.mm --out /sdcard/DataBackup --format databackup'
 ```
 
 自有格式产出：
 
 ```
-/sdcard/ozj_backup/com.tencent.mm_20260101_120000/
+/sdcard/appbackup/com.tencent.mm_20260101_120000/
 ├── meta.json          包名 / user / 原 uid / 各类目录的 context 与 gid / 文件数 / 大小
 ├── apk.tar.zst
 ├── user.tar.zst
@@ -235,11 +240,11 @@ APK 归档按上游习惯打成顶层 `./*.apk`。DataBackup 打开「恢复」�
 
 ```bash
 # 恢复本工具的备份
-su -c './ozj-appdata restore --in /sdcard/ozj_backup/com.tencent.mm_20260101_120000 --install-apk --clean'
+su -c './appbackup restore --in /sdcard/appbackup/com.tencent.mm_20260101_120000 --install-apk --clean'
 
 # 直接恢复 DataBackup 的备份（版本目录 / 应用目录 / 备份根目录三种都行，自动下探到最新一份）
-su -c './ozj-appdata restore --in /sdcard/DataBackup --pkg com.tencent.mm --install-apk --clean'
-su -c './ozj-appdata restore --in /sdcard/DataBackup/apps/微信_com.tencent.mm --install-apk --clean'
+su -c './appbackup restore --in /sdcard/DataBackup --pkg com.tencent.mm --install-apk --clean'
+su -c './appbackup restore --in /sdcard/DataBackup/apps/微信_com.tencent.mm --install-apk --clean'
 ```
 
 流程：force-stop → 装 APK（split 走会话）→ 轮询新 uid → **先记目标目录 context 再决定是否 mkdir**
@@ -252,8 +257,8 @@ su -c './ozj-appdata restore --in /sdcard/DataBackup/apps/微信_com.tencent.mm 
 #### 其它
 
 ```bash
-su -c './ozj-appdata info --pkg com.tencent.mm'        # 看目录、uid、gid、context
-su -c './ozj-appdata list --in /sdcard/ozj_backup/xxx' # 看备份内容（两种格式都支持）
+su -c './appbackup info --pkg com.tencent.mm'        # 看目录、uid、gid、context
+su -c './appbackup list --in /sdcard/appbackup/xxx' # 看备份内容（两种格式都支持）
 ```
 
 ### 退出码

@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace ozj {
+namespace appbackup {
 
 // 五类应用数据 + APK
 extern const char* const kDataTypeUser;
@@ -62,4 +62,4 @@ std::string json_get_string(const std::string& text, const std::string& key);
 // 取数字字段（找不到返回 -1）
 long long json_get_number(const std::string& text, const std::string& key);
 
-}  // namespace ozj
+}  // namespace appbackup

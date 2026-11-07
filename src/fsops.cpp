@@ -11,7 +11,7 @@
 #include "common.h"
 #include "proc.h"
 
-namespace ozj {
+namespace appbackup {
 
 bool path_exists(const std::string& path) {
     struct stat st;
@@ -186,4 +186,4 @@ std::string read_file_head(const std::string& path, size_t max_len) {
     return out;
 }
 
-}  // namespace ozj
+}  // namespace appbackup

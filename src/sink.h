@@ -5,7 +5,7 @@
 #include <memory>
 #include <string>
 
-namespace ozj {
+namespace appbackup {
 
 // 归档字节流写入端（原始 / gzip 两种实现）
 class Sink {
@@ -51,4 +51,4 @@ Compression detect_compression(const std::string& path);
 // 解析 --compress 参数：none/tar/plain、gzip/gz、zstd/zst
 bool parse_compression(const std::string& name, Compression* out);
 
-}  // namespace ozj
+}  // namespace appbackup

@@ -1,12 +1,12 @@
-// ozj-appdata —— 应用数据打包 / 恢复工具（需 root）
+// appbackup —— 应用数据打包 / 恢复工具（需 root）
 //
-//   ozj-appdata backup  --pkg <pkg> [--user 0] [--types user,user_de,data,obb,media,apk]
+//   appbackup backup  --pkg <pkg> [--user 0] [--types user,user_de,data,obb,media,apk]
 //                       [--out DIR] [--compress gzip|none] [--kill none|am|kill]
-//   ozj-appdata restore --in DIR [--pkg <pkg>] [--user 0] [--types ...]
+//   appbackup restore --in DIR [--pkg <pkg>] [--user 0] [--types ...]
 //                       [--clean] [--install-apk] [--no-selinux] [--no-verify]
 //                       [--no-checksum] [--force-checksum]
-//   ozj-appdata list    --in DIR
-//   ozj-appdata info    --pkg <pkg> [--user 0]
+//   appbackup list    --in DIR
+//   appbackup info    --pkg <pkg> [--user 0]
 
 #include <unistd.h>
 
@@ -21,7 +21,7 @@
 #include "restore.h"
 #include "sink.h"
 
-using namespace ozj;
+using namespace appbackup;
 
 namespace {
 
@@ -42,7 +42,7 @@ void print_usage() {
         "  --out <dir>         备份根目录，默认当前目录；会在其下建 <包名>_<时间戳>\n"
         "  --compress <mode>   zstd（默认）/ gzip / none\n"
         "  --kill <mode>       打包前停进程：none（默认）/ am / kill\n"
-        "  --format <fmt>      ozj（默认）或 databackup：后者直接生成 DataBackup 能识别并恢复的目录结构\n"
+        "  --format <fmt>      appbackup（默认）或 databackup：后者直接生成 DataBackup 能识别并恢复的目录结构\n"
         "\n"
         "restore 选项:\n"
         "  --in <dir>          备份目录：版本目录 / 应用目录 / 备份根目录均可，自动下探到最新版本\n"
@@ -71,9 +71,9 @@ void print_usage() {
         "  apk      pm path 的父目录下所有 *.apk\n"
         "\n"
         "示例:\n"
-        "  %s backup --pkg com.tencent.mm --out /sdcard/ozj_backup --kill am\n"
+        "  %s backup --pkg com.tencent.mm --out /sdcard/appbackup --kill am\n"
         "  %s backup --pkg com.tencent.mm --out /sdcard/DataBackup --format databackup\n"
-        "  %s restore --in /sdcard/ozj_backup/com.tencent.mm_20260101_120000 --install-apk --clean\n"
+        "  %s restore --in /sdcard/appbackup/com.tencent.mm_20260101_120000 --install-apk --clean\n"
         "  %s restore --in /sdcard/DataBackup/apps/com.tencent.mm/user_0@1767225600000 --clean\n",
         kToolName, kToolVersion, kToolName, kToolName, kToolName, kToolName, kToolName, kToolName, kToolName,
         kToolName);
@@ -141,12 +141,12 @@ int main(int argc, char** argv) {
             bopt.compression = c;
         } else if (a == "--format") {
             std::string f = next("--format");
-            if (f == "ozj") {
+            if (f == "appbackup" || f == "ozj") {  // 兼容旧格式名
                 bopt.databackup_format = false;
             } else if (f == "databackup" || f == "db") {
                 bopt.databackup_format = true;
             } else {
-                fprintf(stderr, "未知格式（ozj / databackup）\n");
+                fprintf(stderr, "未知格式（appbackup / databackup）\n");
                 return 2;
             }
         } else if (a == "--kill") {

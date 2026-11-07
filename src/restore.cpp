@@ -20,7 +20,7 @@
 #include "tar_reader.h"
 #include "uidmap.h"
 
-namespace ozj {
+namespace appbackup {
 
 namespace {
 
@@ -168,7 +168,7 @@ bool install_apk_from(const std::string& in_dir, const BackupMeta& meta, int use
         std::string archive = join_path(in_dir, e.archive);
         if (!path_exists(archive)) continue;
 
-        std::string tmp = strfmt("/data/local/tmp/ozj_apk_%d", static_cast<int>(getpid()));
+        std::string tmp = strfmt("/data/local/tmp/appbackup_apk_%d", static_cast<int>(getpid()));
         run_shell("rm -rf '" + tmp + "'");
         make_dirs(tmp, 0755);
 
@@ -268,6 +268,51 @@ std::string resolve_backup_dir(const std::string& in, const std::string& pkg_hin
     if (starts_with(basename_of(in), "user_")) return in;
     // 应用目录：直接含 user_* 子目录
     std::vector<std::string> sub = list_subdirs(in);
+
+    // 自有格式备份根目录：<in>/<pkg>_<YYYYmmdd_HHMMSS>/meta.json。
+    // 包名允许含下划线，所以包名只信 meta.json 里的字段，不从目录名反推。
+    {
+        struct OwnCand {
+            std::string path;
+            std::string pkg;
+            long long mtime = 0;
+        };
+        std::vector<OwnCand> own;
+        for (const auto& s : sub) {
+            std::string p = join_path(in, s);
+            std::string mj = join_path(p, "meta.json");
+            if (!path_exists(mj)) continue;
+            BackupMeta m;
+            if (!read_meta_file(mj, &m)) continue;
+            if (!pkg_hint.empty() && m.pkg != pkg_hint) continue;
+            struct stat st;
+            OwnCand c;
+            c.path = p;
+            c.pkg = m.pkg;
+            c.mtime = stat(p.c_str(), &st) == 0 ? static_cast<long long>(st.st_mtime) : 0;
+            own.push_back(c);
+        }
+        if (!own.empty()) {
+            if (pkg_hint.empty()) {
+                std::vector<std::string> pkgs;
+                for (const auto& c : own) {
+                    if (std::find(pkgs.begin(), pkgs.end(), c.pkg) == pkgs.end()) pkgs.push_back(c.pkg);
+                }
+                if (pkgs.size() > 1) {
+                    log_error("%s 下有 %zu 个应用备份，请用 --pkg 指定：", in.c_str(), pkgs.size());
+                    for (const auto& p : pkgs) log_error("  %s", p.c_str());
+                    return std::string();
+                }
+            }
+            const OwnCand* best = &own[0];
+            for (const auto& c : own) {
+                if (c.mtime > best->mtime) best = &c;
+            }
+            log_info("自动定位备份目录: %s", best->path.c_str());
+            return best->path;
+        }
+    }
+
     bool has_version = false;
     for (const auto& s : sub) {
         if (starts_with(s, "user_")) has_version = true;
@@ -597,4 +642,4 @@ int run_info(const std::string& pkg, int user) {
     return 0;
 }
 
-}  // namespace ozj
+}  // namespace appbackup

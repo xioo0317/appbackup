@@ -2,7 +2,7 @@
 
 #include <string>
 
-namespace ozj {
+namespace appbackup {
 
 // 读符号链接自身（不跟随）的 SELinux context，失败返回空串
 std::string selinux_get_context(const std::string& path);
@@ -17,4 +17,4 @@ bool selinux_restorecon(const std::string& path, bool force, bool recursive);
 // 兜底：取父目录 context 并把 system_data_file 换成 app_data_file
 std::string selinux_derive_app_context(const std::string& dir);
 
-}  // namespace ozj
+}  // namespace appbackup

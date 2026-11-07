@@ -6,7 +6,7 @@
 
 #include "sink.h"
 
-namespace ozj {
+namespace appbackup {
 
 // 打包排除规则：
 //  - exclude_prefixes：归档内路径前缀（目录整棵跳过），如 "com.foo/cache"
@@ -38,4 +38,4 @@ bool tar_write_end(Sink& sink);
 // 判断某个归档内相对路径是否命中排除规则
 bool tar_path_excluded(const std::string& arc_path, const TarOptions& opt);
 
-}  // namespace ozj
+}  // namespace appbackup

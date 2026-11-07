@@ -11,7 +11,7 @@
 #include "md5.h"
 #include "proc.h"
 
-namespace ozj {
+namespace appbackup {
 
 namespace {
 
@@ -254,4 +254,4 @@ bool write_databackup_config(const std::string& dir, const DbFormatInfo& info,
     return true;
 }
 
-}  // namespace ozj
+}  // namespace appbackup

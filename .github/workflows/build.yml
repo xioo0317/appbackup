@@ -29,12 +29,12 @@ jobs:
         run: cmake --build build-host -j"$(nproc)"
 
       - name: Roundtrip test
-        run: ./build-host/ozj-appdata-test
+        run: ./build-host/appbackup-test
 
       - name: CLI smoke
         run: |
-          ./build-host/ozj-appdata --version
-          ./build-host/ozj-appdata --help | head -5
+          ./build-host/appbackup --version
+          ./build-host/appbackup --help | head -5
 
   android:
     name: android ${{ matrix.abi }}
@@ -76,8 +76,8 @@ jobs:
             -DANDROID_PLATFORM=android-${{ matrix.api }} \
             -DANDROID_STL=c++_static \
             -DCMAKE_BUILD_TYPE=Release \
-            -DOZJ_BUILD_TESTS=OFF \
-            -DOZJ_ZSTD_SRC="$ZSTD_SRC"
+            -DAPP_BUILD_TESTS=OFF \
+            -DAPP_ZSTD_SRC="$ZSTD_SRC"
 
       - name: Build
         run: cmake --build "build-${{ matrix.abi }}" -j"$(nproc)"
@@ -87,18 +87,18 @@ jobs:
           NDK: ${{ steps.ndk.outputs.ndk-path }}
         run: |
           "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
-            "build-${{ matrix.abi }}/ozj-appdata"
-          ls -lh "build-${{ matrix.abi }}/ozj-appdata"
-          file "build-${{ matrix.abi }}/ozj-appdata"
+            "build-${{ matrix.abi }}/appbackup"
+          ls -lh "build-${{ matrix.abi }}/appbackup"
+          file "build-${{ matrix.abi }}/appbackup"
 
       - name: Package
         run: |
           mkdir -p dist
-          cp "build-${{ matrix.abi }}/ozj-appdata" "dist/ozj-appdata-${{ matrix.abi }}"
-          cd dist && zip -9 "ozj-appdata-${{ matrix.abi }}.zip" "ozj-appdata-${{ matrix.abi }}"
+          cp "build-${{ matrix.abi }}/appbackup" "dist/appbackup-${{ matrix.abi }}"
+          cd dist && zip -9 "appbackup-${{ matrix.abi }}.zip" "appbackup-${{ matrix.abi }}"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ozj-appdata-${{ matrix.abi }}
-          path: dist/ozj-appdata-${{ matrix.abi }}.zip
+          name: appbackup-${{ matrix.abi }}
+          path: dist/appbackup-${{ matrix.abi }}.zip
           if-no-files-found: error

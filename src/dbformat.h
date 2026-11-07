@@ -7,7 +7,7 @@
 #include "meta.h"
 #include "sink.h"
 
-namespace ozj {
+namespace appbackup {
 
 // DataBackup（Android-DataBackup-custom）的备份目录结构：
 //   <saveDir>/apps/<label>_<pkg>/user_<uid>@<preserveId>/{apk,user,user_de,data,obb,media}.tar.zst
@@ -50,4 +50,4 @@ bool write_md5_sidecar(const std::string& archive_path);
 // 从包管理器读 label / versionName / versionCode（尽力而为，失败留空）
 void fill_package_display_info(const std::string& pkg, int user, DbFormatInfo* info);
 
-}  // namespace ozj
+}  // namespace appbackup

@@ -17,7 +17,7 @@
 #include "tar_writer.h"
 #include "uidmap.h"
 
-namespace ozj {
+namespace appbackup {
 
 namespace {
 
@@ -234,4 +234,4 @@ int run_backup(const BackupOptions& opt) {
     return failed == 0 ? 0 : 1;
 }
 
-}  // namespace ozj
+}  // namespace appbackup

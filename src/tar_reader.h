@@ -8,7 +8,7 @@
 
 #include "sink.h"
 
-namespace ozj {
+namespace appbackup {
 
 struct ExtractOptions {
     std::string dest_dir;                        // 解包根目录（归档内路径相对它）
@@ -28,4 +28,4 @@ struct ExtractStats {
 
 bool tar_extract(Source& src, const ExtractOptions& opt, ExtractStats* stats);
 
-}  // namespace ozj
+}  // namespace appbackup

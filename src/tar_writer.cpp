@@ -13,7 +13,7 @@
 #include "common.h"
 #include "fsops.h"
 
-namespace ozj {
+namespace appbackup {
 
 namespace {
 
@@ -336,4 +336,4 @@ bool tar_write_end(Sink& sink) {
     return sink.write(zeros, sizeof(zeros));
 }
 
-}  // namespace ozj
+}  // namespace appbackup

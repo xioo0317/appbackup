@@ -12,7 +12,7 @@
 #include "meta.h"
 #include "tar_reader.h"
 
-namespace ozj {
+namespace appbackup {
 namespace policy {
 
 // 干净恢复时保留的目录名（与 DataBackup SELinux.cleanRestore 一致）
@@ -48,4 +48,4 @@ inline void apply_restore_exclusions(const std::string& type, const std::string&
 }
 
 }  // namespace policy
-}  // namespace ozj
+}  // namespace appbackup

@@ -9,7 +9,7 @@
 
 #include "common.h"
 
-namespace ozj {
+namespace appbackup {
 
 namespace {
 
@@ -94,4 +94,4 @@ ExecResult run_shell(const std::string& cmd) {
     return wait_with_pipe(pid, fds[0]);
 }
 
-}  // namespace ozj
+}  // namespace appbackup

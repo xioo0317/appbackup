@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-namespace ozj {
+namespace appbackup {
 
 struct ExecResult {
     int code = -1;
@@ -16,4 +16,4 @@ ExecResult run_exec(const std::vector<std::string>& argv);
 // 经过 /bin/sh -c 执行（用于管道场景，例如 zstd | tar）
 ExecResult run_shell(const std::string& cmd);
 
-}  // namespace ozj
+}  // namespace appbackup

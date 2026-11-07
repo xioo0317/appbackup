@@ -3,7 +3,7 @@
 #include <string>
 #include <vector>
 
-namespace ozj {
+namespace appbackup {
 
 struct RestoreOptions {
     std::string pkg;                  // 为空时从 meta.json / package_restore_config.json 读
@@ -28,4 +28,4 @@ int run_list(const std::string& in_dir, const std::string& pkg_hint = std::strin
 // 打印设备侧信息（info 子命令）
 int run_info(const std::string& pkg, int user);
 
-}  // namespace ozj
+}  // namespace appbackup
