@@ -157,8 +157,8 @@ dex/oat 与 ABI 不匹配；`lib` 同理（原生库由 APK 安装时按目标 A
 | 8 | 安装/停进程顺序颠倒 | 旧进程可能持有 db / dex | 先 `force-stop` 再装 APK |
 | 9 | `--in` 只认版本目录 | 指到备份根目录就报错 | 根目录 / 应用目录 / 版本目录都能自动下探 |
 
-`tests/roundtrip.cpp` 里对 1、2、3、7 有可执行断言（构造带 `lib/.ota/cache/Backup_/trashed` 的归档，
-按恢复规则解到父目录，逐条验证结果），不靠人工比对。
+第 1、2、3、7 条由 `restore_policy.h` 的规则函数集中实现（`should_restore_entry` /
+`external_gid`），恢复前统一过一遍，不靠人工比对；主机构建（`-DAPP_HOST_CHECK=ON`）可编译验证。
 
 ---
 
@@ -168,8 +168,8 @@ dex/oat 与 ABI 不匹配；`lib` 同理（原生库由 APK 安装时按目标 A
 
 | 项 | DataBackup | appbackup |
 | --- | --- | --- |
-| 形态 | Android App（Kotlin + Compose） | 单个 C++ 可执行文件（约 1.2 MB，静态链 zstd） |
-| tar | 调用系统 `tar` | 自己实现 ustar + pax 读写 |
+| 形态 | Android App（Kotlin + Compose） | 单个 C++ 可执行文件（arm64-v8a，内嵌 tar + zstd） |
+| tar | 调用自带 GNU tar | **同一份** GNU tar（从上游 `assets/bin.zip` 提取后内嵌） |
 | 压缩 | zstd / lz4 / tar | zstd / tar（DataBackup 不认 gzip，所以不产出 gzip） |
 | 入口 | GUI | 命令行 |
 | 备份目录 | `apps/<pkg>/user_<uid>/` + `@<ts>` 保护版本 | **完全一致** |
@@ -180,30 +180,30 @@ dex/oat 与 ABI 不匹配；`lib` 同理（原生库由 APK 安装时按目标 A
 **没有自有格式**：备份只产出 DataBackup 的目录结构，不存在 `meta.json`、也不再有 `--format` 开关。
 反过来，`restore` 仍能读旧版本生成的 `meta.json` 备份（只读兼容，便于把老备份取回来）。
 
-自实现 tar 的好处：不依赖 toybox/tar 的版本差异（Android 上 `tar` 对 pax 长路径、
-`--totals` 的支持各家 ROM 不一致），也不怕 SELinux 拦 `exec` 系统 tar。
+**不手写 tar**：归档字节由「哪个 tar 实现」决定，手写永远对不齐 pax 头、uname 规则、
+`--totals` 行为。所以直接内嵌上游那份 GNU tar（`prebuilt/arm64-v8a/`），首次运行释放到
+磁盘后调用，和上游 App 走的是同一条命令、同一份二进制。
 
 ### 构建
 
-```bash
-# 主机（会跑往返自测）
-sudo apt install -y cmake g++ zlib1g-dev libzstd-dev zstd
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-./build/appbackup-test
+只产 **Android arm64-v8a** 一个 ABI（其它 ABI 在 configure 阶段直接报错）。
 
-# Android（NDK r27+，zstd 用源码静态编进来）
-curl -sL https://github.com/facebook/zstd/releases/download/v1.5.6/zstd-1.5.6.tar.gz | tar xz -C /tmp
-cmake -S . -B build-arm64 \
+```bash
+# 主机编译检查（内嵌的是 aarch64 二进制，只验编译，不能跑备份）
+sudo apt install -y cmake g++ zlib1g-dev
+cmake -S . -B build-host -DCMAKE_BUILD_TYPE=Release -DAPP_HOST_CHECK=ON
+cmake --build build-host -j
+./build-host/appbackup --version
+
+# Android（NDK r27+）
+cmake -S . -B build-android \
   -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK/build/cmake/android.toolchain.cmake \
   -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-21 \
-  -DANDROID_STL=c++_static -DCMAKE_BUILD_TYPE=Release \
-  -DAPP_BUILD_TESTS=OFF -DAPP_ZSTD_SRC=/tmp/zstd-1.5.6
-cmake --build build-arm64 -j
+  -DANDROID_STL=c++_static -DCMAKE_BUILD_TYPE=Release
+cmake --build build-android -j
 ```
 
-`-DAPP_WITH_ZSTD=OFF` 可关掉 zstd（体积更小，但读不了 `.tar.zst`）。
-CI 会产出 `arm64-v8a` / `armeabi-v7a` / `x86_64` 三个 ABI 的 zip。
+CI 只产出一个 `appbackup-arm64-v8a.zip`。
 
 ### 用法
 

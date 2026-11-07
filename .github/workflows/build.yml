@@ -32,20 +32,8 @@ jobs:
           ./build-host/appbackup --help | head -5
 
   android:
-    name: android ${{ matrix.abi }}
+    name: android arm64-v8a
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - abi: arm64-v8a
-            api: 21
-          - abi: armeabi-v7a
-            api: 21
-          - abi: x86_64
-            api: 21
-          - abi: x86
-            api: 21
     steps:
       - uses: actions/checkout@v4
 
@@ -60,7 +48,7 @@ jobs:
         run: |
           set -e
           for t in tar zstd; do
-            f="prebuilt/${{ matrix.abi }}/$t"
+            f="prebuilt/arm64-v8a/$t"
             test -f "$f" || { echo "缺少 $f"; exit 1; }
             echo "$f: $(file -b "$f")"
           done
@@ -69,33 +57,33 @@ jobs:
         env:
           NDK: ${{ steps.ndk.outputs.ndk-path }}
         run: |
-          cmake -S . -B "build-${{ matrix.abi }}" \
+          cmake -S . -B build-android \
             -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
-            -DANDROID_ABI=${{ matrix.abi }} \
-            -DANDROID_PLATFORM=android-${{ matrix.api }} \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-21 \
             -DANDROID_STL=c++_static \
             -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
-        run: cmake --build "build-${{ matrix.abi }}" -j"$(nproc)"
+        run: cmake --build build-android -j"$(nproc)"
 
       - name: Strip
         env:
           NDK: ${{ steps.ndk.outputs.ndk-path }}
         run: |
           "$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip" \
-            "build-${{ matrix.abi }}/appbackup"
-          ls -lh "build-${{ matrix.abi }}/appbackup"
-          file "build-${{ matrix.abi }}/appbackup"
+            build-android/appbackup
+          ls -lh build-android/appbackup
+          file build-android/appbackup
 
       - name: Package
         run: |
           mkdir -p dist
-          cp "build-${{ matrix.abi }}/appbackup" "dist/appbackup-${{ matrix.abi }}"
-          cd dist && zip -9 "appbackup-${{ matrix.abi }}.zip" "appbackup-${{ matrix.abi }}"
+          cp build-android/appbackup dist/appbackup-arm64-v8a
+          cd dist && zip -9 appbackup-arm64-v8a.zip appbackup-arm64-v8a
 
       - uses: actions/upload-artifact@v4
         with:
-          name: appbackup-${{ matrix.abi }}
-          path: dist/appbackup-${{ matrix.abi }}.zip
+          name: appbackup-arm64-v8a
+          path: dist/appbackup-arm64-v8a.zip
           if-no-files-found: error

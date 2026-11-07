@@ -9,13 +9,18 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# 正式产物只有 Android 版：可执行文件内嵌对应 ABI 的静态 tar + zstd（见下方 APP_EMBED_*）。
+# 正式产物只有 Android/arm64-v8a：可执行文件内嵌同 ABI 的静态 tar + zstd（见下方 APP_EMBED_*）。
 # 非 Android 构建仅用于开发期编译检查，运行时因 ABI 不符会回退系统 tar。
 option(APP_HOST_CHECK "非 Android 主机上构建（仅编译检查）" OFF)
 if(NOT ANDROID AND NOT APP_HOST_CHECK)
     message(FATAL_ERROR
-        "本项目面向 Android（内嵌 arm64 静态 tar/zstd）。\n"
+        "本项目面向 Android/arm64-v8a（内嵌同 ABI 静态 tar/zstd）。\n"
         "如需在主机上做编译检查，请加 -DAPP_HOST_CHECK=ON。")
+endif()
+if(ANDROID AND NOT ANDROID_ABI STREQUAL "arm64-v8a")
+    message(FATAL_ERROR
+        "只发布 arm64-v8a（prebuilt/ 仅提供该 ABI 的 tar/zstd）。当前 ANDROID_ABI=${ANDROID_ABI}。\n"
+        "如需其它 ABI，请先从上游 source/app/src/<abi>/assets/bin.zip 提取 tar、zstd 放进 prebuilt/<abi>/。")
 endif()
 
 # ---- 内嵌 tar / zstd ----------------------------------------------------------
@@ -23,15 +28,10 @@ endif()
 # 并 PATH 前置（BaseUtil.EnvInitializer）。归档字节由 tar 实现决定，所以必须用同一份。
 # 这里做等价的事：把同样的二进制嵌进可执行文件，运行时释放到磁盘，免去额外部署。
 #
-# 嵌入方式用汇编制导的 `.incbin`，不用 `ld -r -b binary`：NDK 的 ld 是 ld.lld，
+# 嵌入方式用汇编指令 `.incbin`，不用 `ld -r -b binary`：NDK 的 ld 是 ld.lld，
 # 不支持 bfd 的 -b/--format 选项（报 target emulation unknown），而 .incbin 由
-# clang 内置汇编器直接支持，四个 ABI 通用，也不依赖 binutils。
-if(ANDROID)
-    set(_app_default_abi "${ANDROID_ABI}")
-else()
-    set(_app_default_abi "arm64-v8a")
-endif()
-set(APP_EMBED_ABI "${_app_default_abi}" CACHE STRING "prebuilt/<abi>/ 下的 tar/zstd 目标 ABI")
+# clang 内置汇编器直接支持，也不依赖 binutils。
+set(APP_EMBED_ABI "arm64-v8a" CACHE STRING "prebuilt/<abi>/ 下的 tar/zstd 目标 ABI")
 set(APP_EMBED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/prebuilt/${APP_EMBED_ABI}")
 if(NOT EXISTS "${APP_EMBED_DIR}/tar" OR NOT EXISTS "${APP_EMBED_DIR}/zstd")
     message(FATAL_ERROR
