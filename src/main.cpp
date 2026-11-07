@@ -150,8 +150,13 @@ int main(int argc, char** argv) {
         } else if (a == "--no-incremental") {
             bopt.incremental = false;
         } else if (a == "--format") {
-            fprintf(stderr, "--format 已废弃：现在只产出 DataBackup 结构（apps/<包名>/user_<uid>/）\n");
-            return 2;
+            // 只保留对旧脚本的兼容：databackup 是现在唯一的输出格式；appbackup/ozj 自有格式已废弃
+            std::string f = next("--format");
+            if (f != "databackup" && f != "db") {
+                fprintf(stderr, "--format %s 已废弃：现在只产出 DataBackup 结构（apps/<包名>/user_<uid>/）\n",
+                        f.c_str());
+                return 2;
+            }
         } else if (a == "--kill") {
             std::string m = next("--kill");
             if (m == "none") bopt.kill = KillMode::None;
