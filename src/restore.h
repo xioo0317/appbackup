@@ -6,9 +6,9 @@
 namespace ozj {
 
 struct RestoreOptions {
-    std::string pkg;                  // 为空时从 meta.json 读
+    std::string pkg;                  // 为空时从 meta.json / package_restore_config.json 读
     int user = 0;
-    std::string in_dir;               // 备份目录（含 meta.json）
+    std::string in_dir;               // 备份目录
     std::vector<std::string> types;   // 空表示全部
     bool clean = false;               // 干净恢复：先清空目标第一层（保留 lib/cache/code_cache/no_backup/.ota）
     bool do_selinux = true;

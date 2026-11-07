@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "common.h"
+#include "dbformat.h"
 #include "fsops.h"
 #include "meta.h"
 #include "proc.h"
@@ -43,6 +44,50 @@ std::string target_dir_for(const DataEntry& e, int user, const std::string& pkg)
     return join_path(buf, pkg);
 }
 
+// 读取备份目录：优先 meta.json（本工具格式），否则按 DataBackup 结构推断
+bool load_backup(const std::string& in_dir, BackupMeta* meta) {
+    std::string meta_path = join_path(in_dir, "meta.json");
+    if (path_exists(meta_path)) {
+        return read_meta_file(meta_path, meta);
+    }
+
+    if (!is_databackup_dir(in_dir)) {
+        log_error("%s 里既没有 meta.json，也不是 DataBackup 备份目录", in_dir.c_str());
+        return false;
+    }
+
+    DbFormatInfo info;
+    if (!read_databackup_info(in_dir, &info)) {
+        log_error("无法解析 DataBackup 备份目录: %s", in_dir.c_str());
+        return false;
+    }
+
+    meta->tool = "DataBackup";
+    meta->tool_version = "compatible";
+    meta->pkg = info.pkg;
+    meta->user = info.user;
+    meta->uid = info.uid;
+    meta->gid = info.uid;
+    meta->created_at = now_iso8601();
+    meta->compression = info.compression_type.empty() ? "zstd" : info.compression_type;
+    log_info("识别为 DataBackup 备份：pkg=%s user=%d preserveId=%lld ct=%s", info.pkg.c_str(), info.user,
+             info.preserve_id, info.compression_type.c_str());
+
+    for (const auto& type : all_data_types()) {
+        DataEntry e;
+        e.type = type;
+        e.arc_name = type == kDataTypeApk ? "apk" : info.pkg;
+        std::string archive = find_databackup_archive(in_dir, type);
+        e.exists = !archive.empty();
+        if (e.exists) {
+            e.archive = basename_of(archive);
+            e.bytes = file_size(archive);
+        }
+        meta->entries.push_back(e);
+    }
+    return true;
+}
+
 bool install_apk_from(const std::string& in_dir, const BackupMeta& meta, int user) {
     bool any = false;
     for (const auto& e : meta.entries) {
@@ -55,7 +100,7 @@ bool install_apk_from(const std::string& in_dir, const BackupMeta& meta, int use
         eopt.dest_dir = tmp;
         eopt.restore_owner = false;
         eopt.preserve_mtime = false;
-        std::unique_ptr<Source> src = file_is_gzip(archive) ? open_gzip_source(archive) : open_plain_source(archive);
+        std::unique_ptr<Source> src = open_source_auto(archive);
         if (!src) {
             log_error("cannot open apk archive: %s", archive.c_str());
             continue;
@@ -90,16 +135,13 @@ int run_restore(const RestoreOptions& opt) {
         log_error("restore requires --in <备份目录>");
         return 2;
     }
-    std::string meta_path = join_path(opt.in_dir, "meta.json");
+
     BackupMeta meta;
-    if (!read_meta_file(meta_path, &meta)) {
-        log_error("cannot read %s", meta_path.c_str());
-        return 1;
-    }
+    if (!load_backup(opt.in_dir, &meta)) return 1;
 
     std::string pkg = opt.pkg.empty() ? meta.pkg : opt.pkg;
     if (pkg.empty()) {
-        log_error("no package name in meta.json, use --pkg");
+        log_error("no package name in backup metadata, use --pkg");
         return 2;
     }
     int user = opt.user;
@@ -107,13 +149,9 @@ int run_restore(const RestoreOptions& opt) {
 
     log_info("restore %s (user %d) from %s", pkg.c_str(), user, opt.in_dir.c_str());
 
-    if (opt.install_apk) {
-        install_apk_from(opt.in_dir, meta, user);
-    }
+    if (opt.install_apk) install_apk_from(opt.in_dir, meta, user);
 
-    if (opt.force_stop) {
-        run_shell("am force-stop --user " + std::to_string(user) + " " + pkg);
-    }
+    if (opt.force_stop) run_shell("am force-stop --user " + std::to_string(user) + " " + pkg);
 
     int uid = uid_for_package(pkg, user, 20, 500);
     if (uid < 0) {
@@ -154,6 +192,11 @@ int run_restore(const RestoreOptions& opt) {
             continue;
         }
 
+        // 关键：解包前先记下目标目录当前的 SELinux context。
+        // 目录由 installd 按“本机 uid”创建，其 MCS category 与备份机可能不同，
+        // 照备份机的 context chcon 会让 App 完全失去访问权（avc denied → 启动闪退）。
+        std::string target_context = selinux_get_context(dest);
+
         if (opt.clean) {
             uint64_t n = clean_dir_children(dest, keep_names());
             log_info("[%s] cleaned %llu entries under %s", e.type.c_str(), static_cast<unsigned long long>(n),
@@ -166,7 +209,7 @@ int run_restore(const RestoreOptions& opt) {
         eopt.preserve_mtime = true;
         fill_restore_exclusions(e.type, pkg, &eopt);
 
-        std::unique_ptr<Source> src = file_is_gzip(archive) ? open_gzip_source(archive) : open_plain_source(archive);
+        std::unique_ptr<Source> src = open_source_auto(archive);
         if (!src) {
             log_error("[%s] cannot open %s", e.type.c_str(), archive.c_str());
             failed++;
@@ -194,21 +237,19 @@ int run_restore(const RestoreOptions& opt) {
         if (opt.do_selinux) {
             bool sel_ok = false;
             if (data_type_is_external(e.type)) {
-                // 外部存储 label 由 file_contexts 决定，直接 restorecon
+                // 外部存储 label 由系统 file_contexts 决定，无条件 restorecon
                 sel_ok = selinux_restorecon(dest, true, true);
             } else {
-                if (!e.context.empty()) {
-                    sel_ok = selinux_set_context(dest, e.context, true);
+                if (!target_context.empty()) {
+                    sel_ok = selinux_set_context(dest, target_context, true);
                 }
                 if (!sel_ok) {
-                    std::string derived = selinux_derive_app_context(dest);
+                    std::string derived = selinux_derive_app_context(dirname_of(dest));
                     if (!derived.empty()) sel_ok = selinux_set_context(dest, derived, true);
                 }
                 if (!sel_ok) sel_ok = selinux_restorecon(dest, true, true);
             }
-            if (!sel_ok) {
-                log_warn("[%s] selinux relabel failed on %s", e.type.c_str(), dest.c_str());
-            }
+            if (!sel_ok) log_warn("[%s] selinux relabel failed on %s", e.type.c_str(), dest.c_str());
         }
 
         if (opt.verify_owner) {
@@ -226,8 +267,8 @@ int run_restore(const RestoreOptions& opt) {
             }
         }
 
-        log_info("[%s] restored %llu files (%s) -> %s", e.type.c_str(),
-                 static_cast<unsigned long long>(st.files), human_size(st.bytes).c_str(), dest.c_str());
+        log_info("[%s] restored %llu files (%s) -> %s", e.type.c_str(), static_cast<unsigned long long>(st.files),
+                 human_size(st.bytes).c_str(), dest.c_str());
     }
 
     log_info("restore finished: %s", failed == 0 ? "ok" : "with errors");
@@ -236,14 +277,14 @@ int run_restore(const RestoreOptions& opt) {
 
 int run_list(const std::string& in_dir) {
     BackupMeta meta;
-    if (!read_meta_file(join_path(in_dir, "meta.json"), &meta)) return 1;
-    printf("%-8s %-8s %-10s %-12s %-40s\n", "TYPE", "EXISTS", "FILES", "SIZE", "ARCHIVE");
+    if (!load_backup(in_dir, &meta)) return 1;
+    printf("%-8s %-8s %-10s %-12s %-30s\n", "TYPE", "EXISTS", "FILES", "SIZE", "ARCHIVE");
     for (const auto& e : meta.entries) {
-        printf("%-8s %-8s %-10llu %-12s %-40s\n", e.type.c_str(), e.exists ? "yes" : "no",
+        printf("%-8s %-8s %-10llu %-12s %-30s\n", e.type.c_str(), e.exists ? "yes" : "no",
                static_cast<unsigned long long>(e.files), human_size(e.bytes).c_str(), e.archive.c_str());
     }
-    printf("\npkg=%s user=%d uid=%d compression=%s created=%s\n", meta.pkg.c_str(), meta.user, meta.uid,
-           meta.compression.c_str(), meta.created_at.c_str());
+    printf("\npkg=%s user=%d uid=%d compression=%s created=%s tool=%s\n", meta.pkg.c_str(), meta.user, meta.uid,
+           meta.compression.c_str(), meta.created_at.c_str(), meta.tool.c_str());
     return 0;
 }
 
@@ -268,7 +309,7 @@ int run_info(const std::string& pkg, int user) {
             printf("%-8s -  (missing)\n", t.c_str());
             continue;
         }
-        printf("%-8s %-60s gid=%-6d ctx=%s\n", t.c_str(), path.c_str(), static_cast<int>(gid_of_path(path)),
+        printf("%-8s %-56s gid=%-6d ctx=%s\n", t.c_str(), path.c_str(), static_cast<int>(gid_of_path(path)),
                selinux_get_context(path).c_str());
     }
     return 0;

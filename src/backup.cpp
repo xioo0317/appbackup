@@ -6,8 +6,10 @@
 #include <cerrno>
 #include <cstring>
 #include <ctime>
+#include <memory>
 
 #include "common.h"
+#include "dbformat.h"
 #include "fsops.h"
 #include "proc.h"
 #include "selinux.h"
@@ -29,6 +31,12 @@ std::string timestamp_slug() {
     return std::string(buf);
 }
 
+long long epoch_millis() {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return static_cast<long long>(ts.tv_sec) * 1000LL + ts.tv_nsec / 1000000LL;
+}
+
 // DataBackup 的排除项唯一来源：
 //   USER/USER_DE 排除 <pkg>/.ota|.cache|lib|code_cache|no_backup
 //   DATA/OBB/MEDIA 排除 <pkg>/cache 及 Backup_*/.trashed-*/.pending-*
@@ -43,10 +51,6 @@ void fill_exclusions(const std::string& type, const std::string& pkg, TarOptions
         opt->exclude_globs.push_back(".trashed-*");
         opt->exclude_globs.push_back(".pending-*");
     }
-}
-
-std::string archive_ext_for(const std::string& compression) {
-    return compression == "gzip" ? ".tar.gz" : ".tar";
 }
 
 std::string read_prop(const std::string& key) {
@@ -72,9 +76,10 @@ int run_backup(const BackupOptions& opt) {
         log_error("backup requires --pkg");
         return 2;
     }
-    if (opt.compression != "none" && opt.compression != "gzip") {
-        log_error("unsupported compression: %s", opt.compression.c_str());
-        return 2;
+    Compression compression = opt.compression;
+    if (opt.databackup_format && compression == Compression::Gzip) {
+        log_warn("DataBackup 结构只认 tar / tar.zst，gzip 会被忽略，改用 zstd");
+        compression = Compression::Zstd;
     }
 
     std::vector<std::string> types = opt.types.empty() ? all_data_types() : opt.types;
@@ -94,8 +99,14 @@ int run_backup(const BackupOptions& opt) {
         log_warn("cannot resolve uid for %s (user %d); backup will still proceed", opt.pkg.c_str(), opt.user);
     }
 
-    std::string stamp = timestamp_slug();
-    std::string dest = join_path(opt.out_dir, opt.pkg + "_" + stamp);
+    std::string dest;
+    long long preserve_id = 0;
+    if (opt.databackup_format) {
+        preserve_id = epoch_millis();
+        dest = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, preserve_id);
+    } else {
+        dest = join_path(opt.out_dir, opt.pkg + "_" + timestamp_slug());
+    }
     if (!make_dirs(dest, 0755)) {
         log_error("cannot create %s", dest.c_str());
         return 1;
@@ -113,9 +124,9 @@ int run_backup(const BackupOptions& opt) {
     meta.created_at = now_iso8601();
     meta.device = read_prop("ro.product.model");
     meta.sdk = read_prop("ro.build.version.sdk");
-    meta.compression = opt.compression;
+    meta.compression = compression_name(compression);
 
-    std::string ext = archive_ext_for(opt.compression);
+    std::string ext = std::string(".tar") + compression_suffix(compression);
     uint64_t total_bytes = 0;
     uint64_t total_files = 0;
     int failed = 0;
@@ -155,18 +166,21 @@ int run_backup(const BackupOptions& opt) {
         entry.context = selinux_get_context(src);
         entry.gid = static_cast<long>(gid_of_path(src));
 
-        entry.archive = type + ext;
+        // DataBackup 结构里归档固定叫 <type>.tar.<suffix>；本工具结构里加类型前缀便于阅读
+        entry.archive = opt.databackup_format ? (type + ext) : (type + ext);
         std::string dst = join_path(dest, entry.archive);
 
         TarOptions topt;
         if (type == kDataTypeApk) {
             topt.only_top_level_files = true;
             topt.file_suffix_filter = ".apk";
+            // DataBackup 的 apk.tar 顶层直接就是 ./base.apk，不能有 apk/ 前缀
+            topt.flat_root = opt.databackup_format;
         } else {
             fill_exclusions(type, opt.pkg, &topt);
         }
 
-        std::unique_ptr<Sink> sink = opt.compression == "gzip" ? open_gzip_sink(dst, 6) : open_plain_sink(dst);
+        std::unique_ptr<Sink> sink = open_sink(dst, compression, 6);
         if (!sink) {
             log_error("[%s] cannot open %s", type.c_str(), dst.c_str());
             failed++;
@@ -189,20 +203,33 @@ int run_backup(const BackupOptions& opt) {
         } else {
             log_info("[%s] %llu files, %s -> %s (%s)", type.c_str(), static_cast<unsigned long long>(stats.files),
                      human_size(stats.bytes).c_str(), entry.archive.c_str(),
-                     human_size(static_cast<uint64_t>(file_size(dst))).c_str());
+                     human_size(file_size(dst)).c_str());
+            if (opt.databackup_format) write_md5_sidecar(dst);
         }
-        if (stats.skipped > 0) log_debug("[%s] skipped %llu entries", type.c_str(),
-                                         static_cast<unsigned long long>(stats.skipped));
+        if (stats.skipped > 0) {
+            log_debug("[%s] skipped %llu entries", type.c_str(), static_cast<unsigned long long>(stats.skipped));
+        }
         meta.entries.push_back(entry);
     }
 
-    if (!write_meta_file(join_path(dest, "meta.json"), meta)) {
+    if (opt.databackup_format) {
+        DbFormatInfo info;
+        info.pkg = opt.pkg;
+        info.user = opt.user;
+        info.uid = uid;
+        info.preserve_id = preserve_id;
+        info.compression_type = compression == Compression::Zstd ? "ZSTD" : "TAR";
+        fill_package_display_info(opt.pkg, opt.user, &info);
+        if (!write_databackup_config(dest, info, meta.entries, opt.out_dir)) failed++;
+        log_info("DataBackup 兼容目录已生成：%s", dest.c_str());
+    } else if (!write_meta_file(join_path(dest, "meta.json"), meta)) {
         log_error("meta.json write failed");
         failed++;
     }
 
-    log_info("backup %s -> %s : %llu files, %s, uid=%d", opt.pkg.c_str(), dest.c_str(),
-             static_cast<unsigned long long>(total_files), human_size(total_bytes).c_str(), uid);
+    log_info("backup %s -> %s : %llu files, %s, uid=%d, %s", opt.pkg.c_str(), dest.c_str(),
+             static_cast<unsigned long long>(total_files), human_size(total_bytes).c_str(), uid,
+             compression_name(compression));
     return failed == 0 ? 0 : 1;
 }
 

@@ -346,6 +346,22 @@ bool read_meta_file(const std::string& path, BackupMeta* meta) {
     return backup_meta_from_json(os.str(), meta);
 }
 
+long long json_get_number(const std::string& text, const std::string& key) {
+    std::string needle = "\"" + key + "\"";
+    size_t pos = text.find(needle);
+    if (pos == std::string::npos) return -1;
+    size_t colon = text.find(':', pos + needle.size());
+    if (colon == std::string::npos) return -1;
+    size_t p = colon + 1;
+    while (p < text.size() && (text[p] == ' ' || text[p] == '\t' || text[p] == '\n' || text[p] == '\r')) p++;
+    if (p < text.size() && text[p] == '"') return -1;  // 是字符串字段
+    size_t start = p;
+    if (p < text.size() && (text[p] == '-' || text[p] == '+')) p++;
+    while (p < text.size() && isdigit(static_cast<unsigned char>(text[p]))) p++;
+    if (p == start) return -1;
+    return atoll(text.substr(start, p - start).c_str());
+}
+
 std::string json_get_string(const std::string& text, const std::string& key) {
     std::string needle = "\"" + key + "\"";
     size_t pos = text.find(needle);

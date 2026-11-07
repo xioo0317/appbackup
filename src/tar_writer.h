@@ -16,6 +16,8 @@ struct TarOptions {
     std::vector<std::string> exclude_globs;
     bool only_top_level_files = false;  // 只打包 root 下一层的普通文件（APK 场景）
     std::string file_suffix_filter;     // 仅 when only_top_level_files，如 ".apk"
+    // 不写 root 目录本身，把 root 的子项直接放在归档顶层（DataBackup 的 apk.tar 就是 ./base.apk 这种）
+    bool flat_root = false;
 };
 
 struct TarStats {

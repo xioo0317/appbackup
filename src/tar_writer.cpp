@@ -318,7 +318,16 @@ bool tar_add_tree(Sink& sink, const std::string& abs_root, const std::string& ar
     ctx.sink = &sink;
     ctx.opt = &opt;
     ctx.stats = stats;
-    walk(ctx, abs_root, arc_prefix, true);
+    if (opt.flat_root) {
+        // 扁平模式：root 自身不入归档，子项直接以 ./name 形式出现在顶层
+        std::vector<std::string> names = list_dir(abs_root);
+        for (const auto& n : names) {
+            walk(ctx, join_path(abs_root, n), "./" + n, true);
+            if (!ctx.ok) break;
+        }
+    } else {
+        walk(ctx, abs_root, arc_prefix, true);
+    }
     return ctx.ok;
 }
 

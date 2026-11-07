@@ -18,6 +18,7 @@
 #include "common.h"
 #include "meta.h"
 #include "restore.h"
+#include "sink.h"
 
 using namespace ozj;
 
@@ -38,11 +39,12 @@ void print_usage() {
         "  --user <n>          用户 id，默认 0\n"
         "  --types <list>      逗号分隔，默认全部：user,user_de,data,obb,media,apk\n"
         "  --out <dir>         备份根目录，默认当前目录；会在其下建 <包名>_<时间戳>\n"
-        "  --compress <mode>   gzip（默认）或 none\n"
+        "  --compress <mode>   zstd（默认）/ gzip / none\n"
         "  --kill <mode>       打包前停进程：none（默认）/ am / kill\n"
+        "  --format <fmt>      ozj（默认）或 databackup：后者直接生成 DataBackup 能识别并恢复的目录结构\n"
         "\n"
         "restore 选项:\n"
-        "  --in <dir>          备份目录（含 meta.json，必填）\n"
+        "  --in <dir>          备份目录（本工具格式或 DataBackup 格式，必填）\n"
         "  --pkg <name>        覆盖 meta.json 里的包名\n"
         "  --user <n>          用户 id，默认沿用 meta.json\n"
         "  --types <list>      只恢复指定类型\n"
@@ -67,8 +69,11 @@ void print_usage() {
         "\n"
         "示例:\n"
         "  %s backup --pkg com.tencent.mm --out /sdcard/ozj_backup --kill am\n"
-        "  %s restore --in /sdcard/ozj_backup/com.tencent.mm_20260101_120000 --install-apk --clean\n",
-        kToolName, kToolVersion, kToolName, kToolName, kToolName, kToolName, kToolName, kToolName);
+        "  %s backup --pkg com.tencent.mm --out /sdcard/DataBackup --format databackup\n"
+        "  %s restore --in /sdcard/ozj_backup/com.tencent.mm_20260101_120000 --install-apk --clean\n"
+        "  %s restore --in /sdcard/DataBackup/apps/com.tencent.mm/user_0@1767225600000 --clean\n",
+        kToolName, kToolVersion, kToolName, kToolName, kToolName, kToolName, kToolName, kToolName, kToolName,
+        kToolName);
 }
 
 std::vector<std::string> parse_type_list(const std::string& raw) {
@@ -125,7 +130,22 @@ int main(int argc, char** argv) {
         } else if (a == "--out") {
             bopt.out_dir = next("--out");
         } else if (a == "--compress") {
-            bopt.compression = next("--compress");
+            Compression c;
+            if (!parse_compression(next("--compress"), &c)) {
+                fprintf(stderr, "未知压缩方式（zstd / gzip / none）\n");
+                return 2;
+            }
+            bopt.compression = c;
+        } else if (a == "--format") {
+            std::string f = next("--format");
+            if (f == "ozj") {
+                bopt.databackup_format = false;
+            } else if (f == "databackup" || f == "db") {
+                bopt.databackup_format = true;
+            } else {
+                fprintf(stderr, "未知格式（ozj / databackup）\n");
+                return 2;
+            }
         } else if (a == "--kill") {
             std::string m = next("--kill");
             if (m == "none") bopt.kill = KillMode::None;

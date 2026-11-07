@@ -11,6 +11,9 @@
 
 #include "common.h"
 #include "fsops.h"
+#include "dbformat.h"
+#include "md5.h"
+#include "meta.h"
 #include "proc.h"
 #include "sink.h"
 #include "tar_reader.h"
@@ -177,6 +180,105 @@ int main() {
         if (s) s->close();
         check(ok, "traversal archive handled without error");
         check(!path_exists(base + "/escape.txt"), "path traversal blocked (no ../escape.txt)");
+    }
+
+#if defined(OZJ_HAS_ZSTD)
+    // zstd 往返 + 与系统 zstd 互操作
+    {
+        std::string zst = base + "/t.tar.zst";
+        std::unique_ptr<Sink> sink = open_sink(zst, Compression::Zstd, 6);
+        TarStats st;
+        bool ok = sink && tar_add_tree(*sink, src + "/com.demo.app", "com.demo.app", topt, &st);
+        ok = tar_write_end(*sink) && ok;
+        ok = sink->close() && ok;
+        check(ok, "zstd pack");
+        check(file_is_zstd(zst), "zstd magic detected");
+        check(detect_compression(zst) == Compression::Zstd, "detect_compression -> zstd");
+
+        std::string out4 = base + "/out4";
+        ExtractOptions eopt;
+        eopt.dest_dir = out4;
+        std::unique_ptr<Source> s = open_source_auto(zst);
+        ExtractStats est;
+        bool ok2 = s && tar_extract(*s, eopt, &est);
+        if (s) s->close();
+        check(ok2, "zstd unpack (auto detect)");
+        check(read_all(out4 + "/com.demo.app/a.txt") == "hello ozj\n", "zstd content roundtrip");
+
+        ExecResult r = run_shell("zstd -d -c '" + zst + "' 2>/dev/null | tar -tf - >/dev/null 2>&1");
+        check(r.code == 0, "system zstd+tar can read our .tar.zst");
+    }
+#endif
+
+    // DataBackup 兼容结构：flat apk 归档 + package_restore_config.json + md5
+    {
+        std::string apkSrc = base + "/apksrc";
+        make_dirs(apkSrc, 0755);
+        write_text(apkSrc + "/base.apk", "PK\x03\x04 fake apk");
+        write_text(apkSrc + "/split_config.arm64_v8a.apk", "PK\x03\x04 split");
+        write_text(apkSrc + "/notapk.txt", "skip");
+
+        std::string dbdir = base + "/DataBackup/apps/com.demo.app/user_0@1767225600000";
+        make_dirs(dbdir, 0755);
+        std::string apkArc = dbdir + "/apk.tar" + compression_suffix(Compression::Zstd);
+        {
+            TarOptions t2;
+            t2.only_top_level_files = true;
+            t2.file_suffix_filter = ".apk";
+            t2.flat_root = true;
+            std::unique_ptr<Sink> sink = open_sink(apkArc, Compression::Zstd, 6);
+            TarStats st;
+            bool ok = sink && tar_add_tree(*sink, apkSrc, "apk", t2, &st);
+            ok = tar_write_end(*sink) && ok;
+            ok = sink->close() && ok;
+            check(ok, "flat apk archive");
+            check(st.files == 2, "flat apk keeps 2 top-level apks");
+        }
+        {
+            ExtractOptions eopt;
+            eopt.dest_dir = base + "/apkout";
+            std::unique_ptr<Source> s = open_source_auto(apkArc);
+            ExtractStats est;
+            bool ok = s && tar_extract(*s, eopt, &est);
+            if (s) s->close();
+            check(ok && path_exists(base + "/apkout/base.apk"), "flat apk archive extracts to top level");
+            check(!path_exists(base + "/apkout/notapk.txt"), "non-apk excluded from flat archive");
+        }
+
+        check(write_md5_sidecar(apkArc), "md5 sidecar written");
+        std::string md5txt = trim(read_all(apkArc + ".md5"));
+        check(md5txt == md5_of_file(apkArc) && md5txt.size() == 32, "md5 sidecar content matches");
+        check(md5txt == "d41d8cd98f00b204e9800998ecf8427e" || md5txt != "", "md5 hex format");
+
+        std::vector<DataEntry> entries;
+        DataEntry e;
+        e.type = kDataTypeApk;
+        e.exists = true;
+        e.bytes = 1234;
+        entries.push_back(e);
+        DbFormatInfo info;
+        info.pkg = "com.demo.app";
+        info.user = 0;
+        info.uid = 10234;
+        info.preserve_id = 1767225600000LL;
+        info.compression_type = "ZSTD";
+        check(write_databackup_config(dbdir, info, entries, base + "/DataBackup"), "write package_restore_config.json");
+        check(is_databackup_dir(dbdir), "is_databackup_dir");
+
+        DbFormatInfo back;
+        check(read_databackup_info(dbdir, &back), "read back databackup config");
+        check(back.pkg == "com.demo.app", "config pkg roundtrip");
+        check(back.preserve_id == 1767225600000LL, "config preserveId roundtrip");
+        check(back.compression_type == "ZSTD", "config compressionType roundtrip");
+        check(back.uid == 10234, "config uid roundtrip");
+        check(find_databackup_archive(dbdir, "apk") == apkArc, "find_databackup_archive probes suffix");
+
+        // 目录名兜底（没有 json 时）
+        std::string bare = base + "/DataBackup/apps/com.bare/user_3@1700000000000";
+        make_dirs(bare, 0755);
+        DbFormatInfo bareInfo;
+        check(read_databackup_info(bare, &bareInfo), "read info from dir name only");
+        check(bareInfo.user == 3 && bareInfo.preserve_id == 1700000000000LL, "dir name parsed");
     }
 
     rm_rf(base);

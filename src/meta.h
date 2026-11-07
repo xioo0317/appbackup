@@ -59,5 +59,7 @@ bool read_meta_file(const std::string& path, BackupMeta* meta);
 
 // 简易 JSON 读取辅助（供 restore 读取外部手工编辑的 meta 时容错）
 std::string json_get_string(const std::string& text, const std::string& key);
+// 取数字字段（找不到返回 -1）
+long long json_get_number(const std::string& text, const std::string& key);
 
 }  // namespace ozj

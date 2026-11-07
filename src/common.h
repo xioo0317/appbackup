@@ -11,7 +11,7 @@
 namespace ozj {
 
 constexpr const char* kToolName = "ozj-appdata";
-constexpr const char* kToolVersion = "1.0.0";
+constexpr const char* kToolVersion = "1.1.0";
 
 // 全局日志级别：0=quiet 1=normal 2=verbose
 extern int g_log_level;
