@@ -44,6 +44,7 @@ void print_usage() {
         "  --level <n>         zstd 压缩等级 1-19，默认 1（与 DataBackup 默认一致）\n"
         "  --preserve          已有主备份时先归档为 user_<uid>@<时间戳>\n"
         "  --no-incremental    不读 .manifest 指纹，强制全量重打\n"
+        "  --label <t|auto>    应用目录命名：默认 apps/<pkg>；auto 用设备 label 前缀（<label>_<pkg>）\n"
         "  --kill <mode>       打包前停进程：none（默认）/ am / kill\n"
         "\n"
         "restore 选项:\n"
@@ -55,6 +56,8 @@ void print_usage() {
         "  --install-apk       覆盖安装：即使已安装也从备份重新安装（默认仅在未安装时自动装）\n"
         "  --no-apk            不安装 APK（应用已卸载时将无法恢复数据）\n"
         "  --no-selinux        跳过 SELinux 重打标签\n"
+        "  --no-permissions    不恢复运行时权限/AppOps（默认恢复，与上游一致）\n"
+        "  --no-ssaid          不恢复 SSAID（默认恢复，写入后重启生效）\n"
         "  --no-verify         跳过属主校验\n"
         "  --no-checksum       跳过恢复前的 <归档>.md5 校验\n"
         "  --force-checksum    MD5 不一致时仍强制恢复\n"
@@ -150,6 +153,9 @@ int main(int argc, char** argv) {
             bopt.preserve = true;
         } else if (a == "--no-incremental") {
             bopt.incremental = false;
+        } else if (a == "--label") {
+            // 应用目录命名：默认 apps/<pkg>/user_N；--label auto 用设备探测到的 label 做前缀
+            bopt.label = next("--label");
         } else if (a == "--format") {
             // 只有 DataBackup 一种输出格式，--format 仅作旧脚本兼容占位，忽略具体取值
             std::string f = next("--format");
@@ -182,6 +188,10 @@ int main(int argc, char** argv) {
             ropt.do_selinux = false;
         } else if (a == "--no-verify") {
             ropt.verify_owner = false;
+        } else if (a == "--no-permissions") {
+            ropt.restore_permissions = false;
+        } else if (a == "--no-ssaid") {
+            ropt.restore_ssaid = false;
         } else if (a == "--no-checksum") {
             ropt.verify_checksum = false;
         } else if (a == "--force-checksum") {

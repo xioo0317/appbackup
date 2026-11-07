@@ -20,6 +20,9 @@ struct RestoreOptions {
     bool force_stop = true;
     bool verify_checksum = true;      // 恢复前校验 <归档>.md5（与 DataBackup 一致，缺失则跳过）
     bool force_checksum = false;      // 校验不一致时仍强制恢复
+    // 与上游 restorePermissions / restoreSsaid 对齐（受 config 里 dataStates 的选择控制）
+    bool restore_permissions = true;  // --no-permissions 关闭
+    bool restore_ssaid = true;        // --no-ssaid 关闭
 };
 
 // 返回进程退出码：0 成功

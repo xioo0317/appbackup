@@ -210,6 +210,56 @@ bool install_apk_from(const std::string& in_dir, const BackupMeta& meta, int use
     return any;
 }
 
+// 与上游 PackagesRestoreUtil.restorePermissions 对齐：
+//   1) appops reset --user <u> <pkg>               （Appops.reset）
+//   2) 逐条 pm grant / revoke --user <u> <pkg> <perm>（grantRuntimePermission/revoke）
+//   3) op != OP_NONE 且 mode 已知时 appops set --uid <pkg> <op> <mode>（setOpsMode）
+void restore_permissions(const std::string& pkg, int user, const std::vector<PermEntry>& perms) {
+    if (perms.empty()) {
+        log_info("permissions: 备份里没有记录，跳过");
+        return;
+    }
+    log_info("恢复权限：%zu 项", perms.size());
+    run_shell("appops reset --user " + std::to_string(user) + " '" + pkg + "' 2>/dev/null");
+
+    int granted_n = 0, revoked_n = 0, ops_n = 0;
+    for (const auto& p : perms) {
+        std::string cmd = "pm " + std::string(p.granted ? "grant" : "revoke") + " --user " +
+                          std::to_string(user) + " '" + pkg + "' '" + p.name + "' 2>/dev/null";
+        if (run_shell(cmd).code == 0) {
+            if (p.granted) {
+                granted_n++;
+            } else {
+                revoked_n++;
+            }
+        }
+        if (p.op >= 0 && p.mode >= 0) {
+            std::string mt = std::to_string(p.mode);
+            std::string ot = std::to_string(p.op);
+            if (run_shell("appops set --uid '" + pkg + "' " + ot + " " + mt + " 2>/dev/null").code != 0) {
+                run_shell("appops set '" + pkg + "' " + ot + " " + mt + " 2>/dev/null");
+            }
+            ops_n++;
+        }
+    }
+    log_info("权限：grant %d / revoke %d / appop %d", granted_n, revoked_n, ops_n);
+}
+
+// SSAID：上游通过 SettingsState（settings provider 内部 API）即时生效；
+// 我们是 root CLI，只能改 /data/system/users/<u>/settings_ssaid.xml，
+// provider 缓存不会立刻刷新 —— 通常需要重启（或 provider 被重启）才完全生效。
+void restore_ssaid(const std::string& pkg, int user, int uid, const std::string& value) {
+    if (value.empty()) {
+        log_info("ssaid: 备份里为空，跳过");
+        return;
+    }
+    if (write_ssaid_value(user, uid, pkg, value)) {
+        log_info("ssaid: 已写入 settings_ssaid.xml（%s），重启后完全生效", value.c_str());
+    } else {
+        log_warn("ssaid: 写入失败（%s）", value.c_str());
+    }
+}
+
 // 读取备份目录：优先 meta.json（本工具格式），否则按 DataBackup 结构解析
 bool load_backup(const std::string& in_dir, BackupMeta* meta) {
     std::string meta_path = join_path(in_dir, "meta.json");
@@ -236,6 +286,11 @@ bool load_backup(const std::string& in_dir, BackupMeta* meta) {
     meta->gid = info.uid;
     meta->created_at = now_iso8601();
     meta->compression = info.compression_type.empty() ? "zstd" : info.compression_type;
+    // 权限 / SSAID（上游 App 备份里带的，恢复时按 dataStates 里的选择应用）
+    meta->permissions = info.permissions;
+    meta->ssaid = info.ssaid;
+    meta->permission_selected = info.permission_selected;
+    meta->ssaid_selected = info.ssaid_selected;
     log_info("识别为 DataBackup 备份：pkg=%s user=%d preserveId=%lld ct=%s", info.pkg.c_str(), info.user,
              info.preserve_id, info.compression_type.c_str());
 
@@ -624,6 +679,14 @@ int run_restore(const RestoreOptions& opt) {
         }
 
         log_info("[%s] restored -> %s", e.type.c_str(), dest.c_str());
+    }
+
+    // 7) 权限与 SSAID：上游在数据恢复之后做 restorePermissions / restoreSsaid
+    if (opt.restore_permissions && meta.permission_selected) {
+        restore_permissions(pkg, user, meta.permissions);
+    }
+    if (opt.restore_ssaid && meta.ssaid_selected) {
+        restore_ssaid(pkg, user, uid, meta.ssaid);
     }
 
     log_info("restore finished: %s", failed == 0 ? "ok" : "with errors");

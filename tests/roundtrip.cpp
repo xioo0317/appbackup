@@ -126,9 +126,78 @@ int main() {
         check(cfg.find("\"lastBackupTime\": 0") == std::string::npos, "config lastBackupTime stamped");
         check(cfg.find("\"userBytes\": 42") != std::string::npos, "config userBytes from archive size");
         check(cfg.find("\"compressionType\": \"ZSTD\"") != std::string::npos, "config compressionType");
+
+        // ---- permissions / ssaid（上游 PackagePermission 结构，含可空 mode）----
+        DbFormatInfo inf2;
+        inf2.pkg = "com.demo.bk";
+        inf2.user = 0;
+        inf2.uid = 10234;
+        inf2.compression_type = "ZSTD";
+        inf2.permission_selected = true;
+        inf2.ssaid_selected = true;
+        inf2.ssaid = "8f2c1a4b-0000-1111-2222-333344445555";
+        inf2.permissions.push_back({"android.permission.CAMERA", true, 26, 0});
+        inf2.permissions.push_back({"android.permission.READ_LOGS", false, -1, -1});
+        std::string dir3 = base + "/db3/apps/com.demo.bk/user_0";
+        make_dirs(dir3, 0755);
+        check(write_databackup_config(dir3, inf2, es, base + "/db3"), "config with permissions written");
+        std::string cfg3 = read_all(dir3 + "/package_restore_config.json");
+        check(cfg3.find("\"permissionState\": \"Selected\"") != std::string::npos, "permissionState Selected");
+        check(cfg3.find("\"ssaidState\": \"Selected\"") != std::string::npos, "ssaidState Selected");
+        check(cfg3.find("\"name\": \"android.permission.CAMERA\"") != std::string::npos, "permission name emitted");
+        check(cfg3.find("\"op\": 26") != std::string::npos, "permission op emitted");
+        check(cfg3.find("\"mode\": null") != std::string::npos, "unknown AppOps mode -> null");
+        check(cfg3.find("\"ssaid\": \"8f2c1a4b") != std::string::npos, "ssaid emitted");
+
+        // 读回来要能还原（上游 App 的备份同样走这条解析路径）
+        DbFormatInfo back;
+        check(read_databackup_info(dir3, &back), "read back config with permissions");
+        check(back.permissions.size() == 2, "permissions count roundtrip");
+        check(back.permission_selected && back.ssaid_selected, "dataStates flags roundtrip");
+        check(!back.permissions.empty() && back.permissions[0].granted && back.permissions[0].op == 26,
+              "permission granted/op roundtrip");
+        check(back.ssaid == inf2.ssaid, "ssaid roundtrip");
+
+        // 把产物留一份给 schema 校验脚本
+        std::string save = read_all(dir3 + "/package_restore_config.json");
+        FILE* pf = fopen("/tmp/appbackup_cfg_preview.json", "wb");
+        if (pf) {
+            fwrite(save.data(), 1, save.size(), pf);
+            fclose(pf);
+        }
     }
 
     rm_rf(base);
+
+    // ---- SSAID：按 settings_ssaid.xml 结构就地改写（用假 /data/system/users 注入）----
+    {
+        std::string users = base + "/sysusers";
+        make_dirs(users + "/0", 0755);
+        std::string xml =
+            "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>\n"
+            "<settings version=\"-1\">\n"
+            "  <setting id=\"0\" name=\"10001\" value=\"aaaa-old\" package=\"com.a\" />\n"
+            "  <setting id=\"1\" name=\"10234\" value=\"bbbb-old\" package=\"com.demo.bk\" />\n"
+            "</settings>\n";
+        write_text(users + "/0/settings_ssaid.xml", xml);
+
+        setenv("APPBACKUP_SYS_USERS_DIR", users.c_str(), 1);
+        check(read_ssaid_value(0, 10234) == "bbbb-old", "ssaid read existing entry");
+        check(read_ssaid_value(0, 99999).empty(), "ssaid missing entry -> empty");
+
+        check(write_ssaid_value(0, 10234, "com.demo.bk", "cccc-new"), "ssaid patch existing");
+        check(read_ssaid_value(0, 10234) == "cccc-new", "ssaid patched in place");
+        check(read_ssaid_value(0, 10001) == "aaaa-old", "ssaid other entry untouched");
+        check(read_all(users + "/0/settings_ssaid.xml").find("package=\"com.demo.bk\"") != std::string::npos,
+              "ssaid keeps other attributes");
+
+        check(write_ssaid_value(0, 99999, "com.brand.new", "dddd-new"), "ssaid insert new entry");
+        check(read_ssaid_value(0, 99999) == "dddd-new", "ssaid inserted entry readable");
+        std::string after = read_all(users + "/0/settings_ssaid.xml");
+        check(after.find("id=\"2\"") != std::string::npos, "ssaid new id = max+1");
+        check(after.find("</settings>") != std::string::npos, "ssaid xml still closed");
+        unsetenv("APPBACKUP_SYS_USERS_DIR");
+    }
 
     // ---- sys_backup / sys_restore 往返（调用系统 tar，与上游 TarUtil 指令一致）----
     {

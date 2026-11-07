@@ -146,14 +146,16 @@ int run_backup(const BackupOptions& opt) {
     info.compression_type = ct_enum_name(opt.compression);
     fill_package_display_info(opt.pkg, opt.user, &info);
 
-    // 主备份目录固定为 user_<userId>（不带 @preserveId）；有 label 时应用目录为 <label>_<pkg>，与上游一致
-    std::string dest = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, 0, info.label);
+    // 主备份目录固定为 user_<userId>（不带 @preserveId）。
+    // 应用目录默认 <pkg>（与上游 archivesRelativeDir 一致），--label 可切成 <label>_<pkg>。
+    std::string dir_label = opt.label == "auto" ? info.label : opt.label;
+    std::string dest = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, 0, dir_label);
     if (opt.preserve && path_exists(dest)) {
         long long pid = epoch_millis();
-        std::string archived = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, pid);
+        std::string archived = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, pid, dir_label);
         while (path_exists(archived)) {
             pid++;
-            archived = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, pid);
+            archived = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, pid, dir_label);
         }
         if (rename(dest.c_str(), archived.c_str()) != 0) {
             log_error("无法归档旧主备份 %s: %s", dest.c_str(), strerror(errno));
@@ -262,6 +264,7 @@ int run_backup(const BackupOptions& opt) {
         }
 
         entry.bytes = file_size(dst);
+        entry.raw_bytes = unc;
         total_bytes += entry.bytes;
         log_info("[%s] %s 原始 -> %s（压缩后 %s）", type.c_str(), human_size(unc).c_str(),
                  entry.archive.c_str(), human_size(entry.bytes).c_str());
@@ -283,6 +286,24 @@ int run_backup(const BackupOptions& opt) {
         log_error("backup %s : 没有任何数据可备份（应用是否已卸载 / 源目录不存在？）", opt.pkg.c_str());
         return 1;
     }
+
+    // 权限与 SSAID：上游把这两项也写进 package_restore_config.json（dataStates 里标记 Selected），
+    // 恢复时先 appops reset 再逐条 grant/revoke + setMode，并按 ssaid 改 settings_ssaid.xml。
+    // 我们同样采集，保证产出的备份能被上游 App 完整恢复。
+    if (uid > 0) {
+        fill_package_permissions(opt.pkg, opt.user, uid, &info);
+        info.ssaid = read_ssaid_value(opt.user, uid);
+        // 只有真的采集到内容才标记 Selected：否则上游恢复会先 appops reset 把现有权限清掉
+        info.permission_selected = !info.permissions.empty();
+        info.ssaid_selected = !info.ssaid.empty();
+        log_info("permissions: %zu 项, ssaid: %s", info.permissions.size(),
+                 info.ssaid.empty() ? "(空)" : info.ssaid.c_str());
+    } else {
+        info.permission_selected = false;
+        info.ssaid_selected = false;
+        log_warn("uid 未知，跳过权限/SSAID 采集");
+    }
+
     if (!write_databackup_config(dest, info, entries, opt.out_dir)) failed++;
 
     std::string skip_note =

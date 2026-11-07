@@ -34,7 +34,17 @@ struct DataEntry {
     long uid = 0;
     bool exists = false;
     uint64_t files = 0;
-    uint64_t bytes = 0;
+    uint64_t bytes = 0;       // 归档（压缩后）大小
+    uint64_t raw_bytes = 0;   // 原始 tar 大小（上游 dataStats 口径）
+};
+
+// 与上游 PackagePermission 对齐：op 是 AppOps 代码（-1 == OP_NONE），mode 是 AppOps 模式
+// （-1 表示未知，JSON 里写 null —— 上游 PackagePermission.mode 本身就是可空）
+struct PermEntry {
+    std::string name;
+    bool granted = false;
+    int op = -1;
+    int mode = -1;
 };
 
 struct BackupMeta {
@@ -49,6 +59,11 @@ struct BackupMeta {
     std::string sdk;
     std::string compression;  // none | gzip
     std::vector<DataEntry> entries;
+    // 上游 package_restore_config.json 的 extraInfo.permissions / ssaid
+    std::vector<PermEntry> permissions;
+    std::string ssaid;
+    bool permission_selected = false;
+    bool ssaid_selected = false;
 };
 
 std::string backup_meta_to_json(const BackupMeta& meta);

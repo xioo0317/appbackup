@@ -20,6 +20,10 @@ struct BackupOptions {
     int user = 0;
     std::vector<std::string> types;   // 空表示全部
     std::string out_dir = ".";        // 备份根目录（其下建 apps/<pkg>/user_<uid>）
+    // 应用目录命名：默认空 → apps/<pkg>/user_<uid>（上游 main 分支的 archivesRelativeDir）
+    // 传 "auto" → 用设备上探测到的 label 做前缀 apps/<label>_<pkg>/user_<uid>（1.x 风格）
+    // 传具体文本 → 用该文本做前缀
+    std::string label;
     Compression compression = Compression::Zstd;
     int level = 1;                    // zstd 压缩等级，与 DataBackup 默认一致
     bool preserve = false;            // 已有主备份时先归档为 user_<uid>@<ts>
