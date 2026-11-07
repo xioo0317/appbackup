@@ -15,6 +15,7 @@
 #include "md5.h"
 #include "meta.h"
 #include "proc.h"
+#include "restore_policy.h"
 #include "sink.h"
 #include "tar_reader.h"
 #include "tar_writer.h"
@@ -205,14 +206,18 @@ int main() {
         check(ok2, "zstd unpack (auto detect)");
         check(read_all(out4 + "/com.demo.app/a.txt") == "hello ozj\n", "zstd content roundtrip");
 
-        ExecResult r = run_shell("zstd -d -c '" + zst + "' 2>/dev/null | tar -tf - >/dev/null 2>&1");
-        check(r.code == 0, "system zstd+tar can read our .tar.zst");
+        ExecResult has = run_shell("command -v zstd >/dev/null 2>&1");
+        if (has.code == 0) {
+            ExecResult r = run_shell("zstd -d -c '" + zst + "' 2>/dev/null | tar -tf - >/dev/null 2>&1");
+            check(r.code == 0, "system zstd+tar can read our .tar.zst");
+        } else {
+            printf("[SKIP] system zstd+tar (host has no zstd CLI)\n");
+        }
     }
 #endif
 
     // DataBackup 兼容结构：flat apk 归档 + package_restore_config.json + md5
-    {
-        std::string apkSrc = base + "/apksrc";
+    {        std::string apkSrc = base + "/apksrc";
         make_dirs(apkSrc, 0755);
         write_text(apkSrc + "/base.apk", "PK\x03\x04 fake apk");
         write_text(apkSrc + "/split_config.arm64_v8a.apk", "PK\x03\x04 split");
@@ -279,6 +284,105 @@ int main() {
         DbFormatInfo bareInfo;
         check(read_databackup_info(bare, &bareInfo), "read info from dir name only");
         check(bareInfo.user == 3 && bareInfo.preserve_id == 1700000000000LL, "dir name parsed");
+    }
+
+    // 恢复策略：目录映射 / 解包根 / 排除项（对齐 DataBackup PackagesRestoreUtil）
+    {
+        check(policy::target_dir(kDataTypeUser, 0, "com.a") == "/data/user/0/com.a", "target_dir user");
+        check(policy::target_dir(kDataTypeUserDe, 10, "com.a") == "/data/user_de/10/com.a", "target_dir user_de");
+        check(policy::target_dir(kDataTypeData, 0, "com.a") == "/data/media/0/Android/data/com.a", "target_dir data");
+        check(policy::target_dir(kDataTypeObb, 0, "com.a") == "/data/media/0/Android/obb/com.a", "target_dir obb");
+        check(policy::target_dir(kDataTypeMedia, 0, "com.a") == "/data/media/0/Android/media/com.a",
+              "target_dir media");
+        check(policy::target_dir(kDataTypeApk, 0, "com.a").empty(), "target_dir apk empty");
+
+        // 解包根必须是父目录：解到 dest 本身会产生 <pkg>/<pkg>/...（历史 bug）
+        check(policy::extract_root_for("/data/user/0/com.a") == "/data/user/0", "extract_root user");
+        check(policy::extract_root_for("/data/media/0/Android/data/com.a") == "/data/media/0/Android/data",
+              "extract_root external");
+
+        // 实打实跑一遍：带 lib/.ota/cache/Backup_/trashed 的归档，按恢复规则解到父目录
+        std::string rsrc = base + "/rsrc/com.demo.restore";
+        std::string rpkg = "com.demo.restore";
+        make_dirs(rsrc + "/files", 0755);
+        make_dirs(rsrc + "/lib/arm64", 0755);
+        make_dirs(rsrc + "/.ota", 0755);
+        make_dirs(rsrc + "/cache", 0755);
+        make_dirs(rsrc + "/code_cache", 0755);
+        make_dirs(rsrc + "/no_backup", 0755);
+        write_text(rsrc + "/files/keep.txt", "keep\n");
+        write_text(rsrc + "/lib/arm64/libnative.so", "stale so");
+        write_text(rsrc + "/.ota/patch.bin", "ota");
+        write_text(rsrc + "/cache/c.bin", "cache");
+        write_text(rsrc + "/code_cache/cc.bin", "cc");
+        write_text(rsrc + "/no_backup/nb.bin", "nb");
+        write_text(rsrc + "/Backup_2024.db", "bak");
+        write_text(rsrc + "/.trashed-1700000000-p.jpg", "trash");
+        write_text(rsrc + "/.Trashed-1700000000-q.jpg", "trash2");
+
+        std::string rarc = base + "/r.tar";
+        {
+            ExtractOptions rules;
+            policy::apply_restore_exclusions(kDataTypeUser, rpkg, &rules);
+            TarOptions o;
+            o.exclude_prefixes = rules.exclude_prefixes;
+            o.exclude_globs = rules.exclude_globs;
+            std::unique_ptr<Sink> sink = open_plain_sink(rarc);
+            TarStats st;
+            bool ok = tar_add_tree(*sink, rsrc, rpkg, o, &st);
+            ok = tar_write_end(*sink) && ok;
+            ok = sink->close() && ok;
+            check(ok, "restore-shaped archive built");
+        }
+        {
+            std::string parent = base + "/rparent";
+            make_dirs(parent + "/" + rpkg, 0755);  // 模拟 installd 已建好包目录
+            ExtractOptions eopt;
+            eopt.dest_dir = parent;                 // 关键：父目录
+            eopt.restore_owner = false;
+            policy::apply_restore_exclusions(kDataTypeUser, rpkg, &eopt);
+            std::unique_ptr<Source> s = open_plain_source(rarc);
+            ExtractStats est;
+            bool ok = s && tar_extract(*s, eopt, &est);
+            if (s) s->close();
+            check(ok, "restore-shaped extract");
+            check(path_exists(parent + "/" + rpkg + "/files/keep.txt"), "user data landed at <parent>/<pkg>/files");
+            check(!path_exists(parent + "/" + rpkg + "/" + rpkg), "no double <pkg>/<pkg> nesting");
+            check(!path_exists(parent + "/" + rpkg + "/lib/arm64/libnative.so"), "restore excludes lib (stale .so)");
+            check(!path_exists(parent + "/" + rpkg + "/.ota/patch.bin"), "restore excludes .ota");
+            check(!path_exists(parent + "/" + rpkg + "/cache/c.bin"), "restore excludes cache");
+            check(!path_exists(parent + "/" + rpkg + "/code_cache/cc.bin"), "restore excludes code_cache");
+            check(!path_exists(parent + "/" + rpkg + "/no_backup/nb.bin"), "restore excludes no_backup");
+        }
+
+        // data 类型额外排除 Backup_* 与回收站文件（大小写）
+        {
+            ExtractOptions o;
+            policy::apply_restore_exclusions(kDataTypeData, rpkg, &o);
+            TarOptions probe;
+            probe.exclude_prefixes = o.exclude_prefixes;
+            probe.exclude_globs = o.exclude_globs;
+            check(tar_path_excluded(rpkg + "/Backup_2024.db", probe), "data excludes Backup_*");
+            check(tar_path_excluded(rpkg + "/.trashed-1-a.jpg", probe), "data excludes .trashed-*");
+            check(tar_path_excluded(rpkg + "/.Trashed-1-a.jpg", probe), "data excludes .Trashed-*");
+            check(tar_path_excluded(rpkg + "/.pending-1-a.jpg", probe), "data excludes .pending-*");
+            check(!tar_path_excluded(rpkg + "/files/keep.txt", probe), "data keeps normal files");
+
+            // user 类型不套用 Backup_*/trashed（保持与上游一致，避免误删应用自身数据）
+            ExtractOptions uo;
+            policy::apply_restore_exclusions(kDataTypeUser, rpkg, &uo);
+            TarOptions u;
+            u.exclude_prefixes = uo.exclude_prefixes;
+            u.exclude_globs = uo.exclude_globs;
+            check(!tar_path_excluded(rpkg + "/Backup_2024.db", u), "user does not exclude Backup_*");
+            check(tar_path_excluded(rpkg + "/lib/x.so", u), "user excludes lib");
+        }
+
+        // 干净恢复保留项
+        {
+            std::vector<std::string> keep = policy::keep_names();
+            check(keep.size() == 5, "keep_names has 5 entries");
+        }
     }
 
     rm_rf(base);

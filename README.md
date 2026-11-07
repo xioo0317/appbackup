@@ -66,12 +66,13 @@ APK 那一路是 `tar -C <apk 父目录> -cpf - ./*.apk`，所以 **apk.tar 的�
 
 ```
 user / user_de :  <pkg>/.ota  <pkg>/cache  <pkg>/lib  <pkg>/code_cache  <pkg>/no_backup
-data/obb/media :  <pkg>/cache  + 通配 Backup_*  .trashed-*  .pending-*
+data/obb/media :  <pkg>/cache  + 通配 Backup_*  .trashed-*  .pending-*  .Trashed-*  .Pending-*
 ```
 
 排除 `cache` / `code_cache` 是因为这些是**新机上必然会重新生成**的东西，带过去只会带来
 dex/oat 与 ABI 不匹配；`lib` 同理（原生库由 APK 安装时按目标 ABI 释放）；
-`Backup_*`、`.trashed-*`、`.pending-*` 是微信/QQ 之类的临时目录，体积大且无意义。
+`Backup_*`、`.trashed-*`、`.pending-*` 是微信/QQ 之类的临时目录，体积大且无意义
+（`trashed`/`pending` 是 AOSP MediaProvider 的回收站与写入中前缀，大小写都匹配）。
 
 ### 5. 打包前可选杀进程
 
@@ -84,28 +85,40 @@ dex/oat 与 ABI 不匹配；`lib` 同理（原生库由 APK 安装时按目标 A
 
 `PackagesRestoreUtil.restoreData` 的顺序：
 
-1. `pm install` 装 APK（split 逐个装），等 PackageManager 真正落库。
-2. **查新机上的 uid**：轮询 `pm list packages -U --user N`，最多 20 次 × 500ms。
+1. 先 `force-stop` 掉目标应用（避免旧进程持有 db / dex / so）。
+2. `pm install` 装 APK：**只有 1 个 apk 时才直接装**；base + split 多个时走
+   `pm install-create` → 逐个 `pm install-write` → `pm install-commit` 会话安装。
+   参数按 SDK 分支：34+ 加 `--bypass-low-target-sdk-block`，30+ 加 `-i com.android.vending`，
+   统一 `--user N -r -t -d`。装完轮询确认包真的落库。
+3. **查新机上的 uid**：轮询 `pm list packages -U --user N`，最多 20 次 × 500ms。
    新机的 uid 和备份机的 uid 通常不一样（10123 → 10234 这种），不重映射必然失败。
-3. **解包前先读目标目录当前的 SELinux context**（`ls -Zd <目录>`）。
+4. **解包前先读目标目录当前的 SELinux context**（`ls -Zd <目录>`）。
    目录是 installd 按**本机 uid** 建的，其 MCS 分类（`:c512,c768` 这种）跟备份机可能不同，
    照备份机的 context 打标签会让 App 直接失去访问权。
-4. 可选「干净恢复」：清空目标目录第一层，但保留 `lib` `cache` `code_cache` `no_backup` `.ota`。
+5. 可选「干净恢复」：清空目标目录第一层，但保留 `lib` `cache` `code_cache` `no_backup` `.ota`。
    （不用 `--recursive-unlink`，因为它会把新机已经释放好的 lib 一起删掉。）
-5. 解包：`tar --totals -xpf <归档> -C <目标父目录>`，带排除项（cache/code_cache/no_backup）。
+6. 解包：`tar --totals -xpf <归档> -C <目标父目录>`。
+   **注意是父目录**：归档内顶层就是 `<pkg>/`，`-C` 指到 `/data/user/0` 才对；
+   指到 `/data/user/0/<pkg>` 会解出 `<pkg>/<pkg>/...`，应用读不到数据。
+   排除项（与备份侧不同，恢复侧更严格，五类都排除）：
+   `<pkg>/.ota` `<pkg>/cache` `<pkg>/lib` `<pkg>/code_cache` `<pkg>/no_backup`，
+   外部存储再加 `Backup_*` `.trashed-*` `.pending-*`（大小写两种写法）。
    `-p` 保留权限位；不加 `-m`，保留 mtime（很多 App 靠 mtime 判断缓存新鲜度，游戏反作弊也看）。
-6. `chown -hR <新uid>:<gid> <目标目录>`。
+7. `chown -hR <新uid>:<gid> <目标目录>`。
    `-h` 不跟随符号链接（App 私有目录里符号链接很多，跟随会 chown 到目标机上别的文件）。
    **gid 分两种**：`/data/user*` 用 uid 当 gid；`/data/media/Android/*` 是 FUSE/media_rw，
-   gid 必须取**目标机父目录现有的 gid**，套用 uid 会导致 App 读写外部目录 EACCES。
-7. **SELinux 重打标签**，两条分支：
+   gid 必须取**目标机父目录（即 data/obb/media 根）现有的 gid**，套用 uid 会导致 App 读写外部目录 EACCES。
+8. **SELinux 重打标签**，两条分支：
    - `data/obb/media`（外部存储）：无条件 `restorecon -R -F <目录>`。
      这两处目录常被 MediaProvider 提前建出来，label 可能是 `media_rw_data_file:s0`（没有 category），
      照着快照 chcon 会把整树打错；交给系统按 `file_contexts` 重打才稳。
-   - `user/user_de`：用**第 3 步记下的目标目录 context** 做 `chcon -hR`（含正确的 MCS 分类）；
+   - `user/user_de`：用**第 4 步记下的目标目录 context** 做 `chcon -hR`（含正确的 MCS 分类）；
      context 为空时兜底取父目录 context，把 `system_data_file` 替换成 `app_data_file`。
-8. **属主校验**：`find <目录> ! -user <uid> | wc -l`，非 0 就再 chown 一次（FUSE 下 chown 偶发失效）。
-9. 恢复 appops / 运行时权限 / SSAID（可选）。
+9. **属主校验**：`find <目录> ! -user <uid> | wc -l`，非 0 就再 chown 一次（FUSE 下 chown 偶发失效）。
+10. 恢复 appops / 运行时权限 / SSAID（可选）。
+
+每个归档解包前还会校验 `<归档>.md5`（`ChecksumUtil.verify`）：缺失或算不出就放行，
+不一致则中止并让用户决定是否强制恢复。
 
 ### 所以"换机恢复不闪退"的四个必要条件
 
@@ -117,6 +130,27 @@ dex/oat 与 ABI 不匹配；`lib` 同理（原生库由 APK 安装时按目标 A
 | 包已装好 + 不带旧 cache/code_cache/lib | dex/oat 与 ABI 不匹配，`UnsatisfiedLinkError` / dex 校验失败 |
 
 本工具把这四件事全部照做，另外加了路径穿越防护、硬链接去重和归档 MD5 校验。
+
+### v1.2.0 按上游逐条核对后修掉的偏差
+
+对着 `Android-DataBackup-custom`（`main`，含 `PackagesRestoreUtil` / `PackagesBackupUtil` /
+`SELinux` / `Pm` / `ChecksumUtil` / `PathUtil` / `DataTypeUtil`）逐条比过，以下是与上游不一致、
+且**直接影响恢复后能否正常打开**的问题，已全部改齐：
+
+| # | 偏差 | 后果 | 修正 |
+| --- | --- | --- | --- |
+| 1 | 解包到 `<pkg>` 目录本身，而归档内是 `<pkg>/...` | 解出 `<pkg>/<pkg>/...`，数据等于没恢复 | 解到**父目录**（`extract_root_for`） |
+| 2 | 恢复侧只排除 `cache/code_cache/no_backup` | 归档里的旧 `lib/*.so` 覆盖新装 APK 的 native 库 → `UnsatisfiedLinkError` 闪退 | 五类统一排除 `.ota/cache/lib/code_cache/no_backup` |
+| 3 | 恢复侧没排除 `Backup_*` / 回收站文件 | 应用自己的旧备份、已删照片被复活 | 外部存储补 `Backup_*` + 4 种 trashed/pending |
+| 4 | 未校验 `.md5` | 坏归档静默恢复，必闪退 | 恢复前校验，可 `--no-checksum` / `--force-checksum` |
+| 5 | 多 APK 逐个 `pm install` | split 安装必失败，包残缺 | `install-create/write/commit` 会话安装 |
+| 6 | `pm install` 缺 `-t`、`-i`、SDK34+ 的 bypass | 低 targetSdk / 带 testOnly 的包装不上 | 按 SDK 分支补齐（与 `PmUtil` 一致） |
+| 7 | 外部存储 gid 取目标目录自身 | 目录新建时 gid=0 → 应用写不进外部存储 | 取**父目录**（`data/obb/media` 根）的 gid |
+| 8 | 安装/停进程顺序颠倒 | 旧进程可能持有 db / dex | 先 `force-stop` 再装 APK |
+| 9 | `--in` 只认版本目录 | 指到备份根目录就报错 | 根目录 / 应用目录 / 版本目录都能自动下探 |
+
+`tests/roundtrip.cpp` 里对 1、2、3、7 有可执行断言（构造带 `lib/.ota/cache/Backup_/trashed` 的归档，
+按恢复规则解到父目录，逐条验证结果），不靠人工比对。
 
 ---
 
@@ -166,7 +200,8 @@ ozj-appdata backup  --pkg <包名> [--user 0] [--types user,user_de,data,obb,med
                     [--format ozj|databackup]
 ozj-appdata restore --in <备份目录> [--pkg <包名>] [--user 0] [--types ...]
                     [--clean] [--install-apk] [--no-selinux] [--no-verify]
-ozj-appdata list    --in <备份目录>
+                    [--no-checksum] [--force-checksum]
+ozj-appdata list    --in <备份目录> [--pkg <包名>]
 ozj-appdata info    --pkg <包名> [--user 0]
 ```
 
@@ -202,13 +237,17 @@ APK 归档按上游习惯打成顶层 `./*.apk`。DataBackup 打开「恢复」�
 # 恢复本工具的备份
 su -c './ozj-appdata restore --in /sdcard/ozj_backup/com.tencent.mm_20260101_120000 --install-apk --clean'
 
-# 直接恢复 DataBackup 的备份（目录里没有 meta.json 也能认）
-su -c './ozj-appdata restore --in /sdcard/DataBackup/apps/com.tencent.mm/user_0@1767225600000 --install-apk --clean'
+# 直接恢复 DataBackup 的备份（版本目录 / 应用目录 / 备份根目录三种都行，自动下探到最新一份）
+su -c './ozj-appdata restore --in /sdcard/DataBackup --pkg com.tencent.mm --install-apk --clean'
+su -c './ozj-appdata restore --in /sdcard/DataBackup/apps/微信_com.tencent.mm --install-apk --clean'
 ```
 
-流程：装 APK → force-stop → 轮询新 uid → 记下目标目录 context → 清空目标（保留
-lib/cache/code_cache/no_backup/.ota）→ 解包（跳过 cache/code_cache/no_backup）→ `chown -hR 新uid:gid`
-→ SELinux 重打标签 → 属主校验。全程打印每一步结果，任何一步失败都会明确告警而不是静默继续。
+流程：force-stop → 装 APK（split 走会话）→ 轮询新 uid → **先记目标目录 context 再决定是否 mkdir**
+→ 清空目标（保留 lib/cache/code_cache/no_backup/.ota）→ 校验 md5 → 解包到**父目录**
+（跳过 .ota/cache/lib/code_cache/no_backup，外部存储再加 Backup_*/trashed）→ `chown -hR 新uid:gid`
+→ SELinux 重打标签 → 属主二次校验。全程打印每一步结果，任何一步失败都会明确告警而不是静默继续。
+
+`--in` 指向备份根目录时若有多份应用备份，必须用 `--pkg` 指定，否则会直接报错列出来，不会猜。
 
 #### 其它
 

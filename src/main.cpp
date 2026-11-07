@@ -4,6 +4,7 @@
 //                       [--out DIR] [--compress gzip|none] [--kill none|am|kill]
 //   ozj-appdata restore --in DIR [--pkg <pkg>] [--user 0] [--types ...]
 //                       [--clean] [--install-apk] [--no-selinux] [--no-verify]
+//                       [--no-checksum] [--force-checksum]
 //   ozj-appdata list    --in DIR
 //   ozj-appdata info    --pkg <pkg> [--user 0]
 
@@ -44,14 +45,16 @@ void print_usage() {
         "  --format <fmt>      ozj（默认）或 databackup：后者直接生成 DataBackup 能识别并恢复的目录结构\n"
         "\n"
         "restore 选项:\n"
-        "  --in <dir>          备份目录（本工具格式或 DataBackup 格式，必填）\n"
-        "  --pkg <name>        覆盖 meta.json 里的包名\n"
+        "  --in <dir>          备份目录：版本目录 / 应用目录 / 备份根目录均可，自动下探到最新版本\n"
+        "  --pkg <name>        覆盖 meta.json 里的包名（从根目录下探时用来选应用）\n"
         "  --user <n>          用户 id，默认沿用 meta.json\n"
         "  --types <list>      只恢复指定类型\n"
         "  --clean             干净恢复：先清空目标第一层（保留 lib/cache/code_cache/no_backup/.ota）\n"
-        "  --install-apk       先安装备份里的 APK 再恢复数据\n"
+        "  --install-apk       先安装备份里的 APK（多 APK 自动走 install-create 会话），再恢复数据\n"
         "  --no-selinux        跳过 SELinux 重打标签\n"
         "  --no-verify         跳过属主校验\n"
+        "  --no-checksum       跳过恢复前的 <归档>.md5 校验\n"
+        "  --force-checksum    MD5 不一致时仍强制恢复\n"
         "\n"
         "全局选项:\n"
         "  -v, --verbose       输出调试日志\n"
@@ -166,6 +169,10 @@ int main(int argc, char** argv) {
             ropt.do_selinux = false;
         } else if (a == "--no-verify") {
             ropt.verify_owner = false;
+        } else if (a == "--no-checksum") {
+            ropt.verify_checksum = false;
+        } else if (a == "--force-checksum") {
+            ropt.force_checksum = true;
         } else if (a == "-v" || a == "--verbose") {
             g_log_level = 2;
         } else if (a == "-q" || a == "--quiet") {
@@ -186,7 +193,7 @@ int main(int argc, char** argv) {
             fprintf(stderr, "list 需要 --in <备份目录>\n");
             return 2;
         }
-        return run_list(list_dir);
+        return run_list(list_dir, bopt.pkg);
     }
     if (cmd == "info") {
         if (bopt.pkg.empty()) {

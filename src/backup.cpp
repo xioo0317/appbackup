@@ -38,8 +38,8 @@ long long epoch_millis() {
 }
 
 // DataBackup 的排除项唯一来源：
-//   USER/USER_DE 排除 <pkg>/.ota|.cache|lib|code_cache|no_backup
-//   DATA/OBB/MEDIA 排除 <pkg>/cache 及 Backup_*/.trashed-*/.pending-*
+//   USER/USER_DE 排除 <pkg>/.ota|/cache|/lib|/code_cache|/no_backup
+//   DATA/OBB/MEDIA 排除 <pkg>/cache 及 Backup_*/回收站/写入中文件
 void fill_exclusions(const std::string& type, const std::string& pkg, TarOptions* opt) {
     if (type == kDataTypeUser || type == kDataTypeUserDe) {
         for (const char* sub : {".ota", "cache", "lib", "code_cache", "no_backup"}) {
@@ -47,9 +47,10 @@ void fill_exclusions(const std::string& type, const std::string& pkg, TarOptions
         }
     } else if (type == kDataTypeData || type == kDataTypeObb || type == kDataTypeMedia) {
         opt->exclude_prefixes.push_back(pkg + "/cache");
-        opt->exclude_globs.push_back("Backup_*");
-        opt->exclude_globs.push_back(".trashed-*");
-        opt->exclude_globs.push_back(".pending-*");
+        // 与 DataBackup TrashedFilePatterns 一致：回收站/写入中文件大小写两种写法都跳过
+        for (const char* g : {"Backup_*", ".trashed-*", ".pending-*", ".Trashed-*", ".Pending-*"}) {
+            opt->exclude_globs.push_back(g);
+        }
     }
 }
 
