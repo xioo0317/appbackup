@@ -5,6 +5,7 @@
 
 #include <ctime>
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <fstream>
 #include <map>
@@ -66,6 +67,73 @@ bool parse_version_dir_name(const std::string& name, int* user, long long* prese
     return true;
 }
 
+// 解码一个 UTF-8 码点；失败返回 false（按单字节丢弃处理）。
+bool utf8_next(const std::string& s, size_t i, uint32_t* cp, size_t* len) {
+    unsigned char c = static_cast<unsigned char>(s[i]);
+    auto cont = [&](size_t k) -> bool {
+        return k < s.size() && (static_cast<unsigned char>(s[k]) & 0xC0) == 0x80;
+    };
+    if (c < 0x80) { *cp = c; *len = 1; return true; }
+    if ((c & 0xE0) == 0xC0 && cont(i + 1)) {
+        *cp = (static_cast<uint32_t>(c & 0x1F) << 6) | (static_cast<unsigned char>(s[i + 1]) & 0x3F);
+        *len = 2;
+        return true;
+    }
+    if ((c & 0xF0) == 0xE0 && cont(i + 1) && cont(i + 2)) {
+        *cp = (static_cast<uint32_t>(c & 0x0F) << 12) |
+              ((static_cast<unsigned char>(s[i + 1]) & 0x3F) << 6) |
+              (static_cast<unsigned char>(s[i + 2]) & 0x3F);
+        *len = 3;
+        return true;
+    }
+    if ((c & 0xF8) == 0xF0 && cont(i + 1) && cont(i + 2) && cont(i + 3)) {
+        *cp = (static_cast<uint32_t>(c & 0x07) << 18) |
+              ((static_cast<unsigned char>(s[i + 1]) & 0x3F) << 12) |
+              ((static_cast<unsigned char>(s[i + 2]) & 0x3F) << 6) |
+              (static_cast<unsigned char>(s[i + 3]) & 0x3F);
+        *len = 4;
+        return true;
+    }
+    return false;
+}
+
+// 与上游 PackageEntity.sanitizedLabel 完全一致：
+//   label.replace(Regex("[^\\u4e00-\\u9fa5A-Za-z0-9_]"), "").trim('_')
+// 即只保留中文/英文/数字/下划线，其余字符（含空格、斜杠、emoji）一律删除，再去掉首尾下划线。
+std::string sanitize_label(const std::string& s) {
+    std::string out;
+    for (size_t i = 0; i < s.size();) {
+        uint32_t cp = 0;
+        size_t len = 1;
+        bool ok = utf8_next(s, i, &cp, &len);
+        bool keep = false;
+        if (ok) {
+            if (len == 1) {
+                char c = static_cast<char>(cp);
+                keep = isalnum(static_cast<unsigned char>(c)) || c == '_';
+            } else {
+                keep = (cp >= 0x4E00 && cp <= 0x9FA5);
+            }
+        }
+        if (keep) out.append(s, i, len);
+        i += ok ? len : 1;
+    }
+    while (!out.empty() && out.front() == '_') out.erase(out.begin());
+    while (!out.empty() && out.back() == '_') out.pop_back();
+    return out;
+}
+
+// 应用目录名可能是 <pkg>，也可能是 <label>_<pkg>。config 里的 packageName 才是准绳，
+// 这里只在 config 缺失/损坏时做兜底：取最后一个下划线后、含 '.' 的那一段。
+std::string pkg_from_app_dir(const std::string& name) {
+    size_t p = name.rfind('_');
+    if (p != std::string::npos) {
+        std::string tail = name.substr(p + 1);
+        if (tail.find('.') != std::string::npos) return tail;
+    }
+    return name;
+}
+
 }  // namespace
 
 bool is_databackup_dir(const std::string& dir) {
@@ -79,10 +147,11 @@ std::string databackup_version_dir(const std::string& save_dir, const std::strin
                                    long long preserve_id, const std::string& label) {
     std::string name = "user_" + std::to_string(user);
     if (preserve_id != 0) name += "@" + std::to_string(preserve_id);
-    // 应用目录：有 label 时与上游一致用 <label>_<pkg>，否则退回 <pkg>
+    // 应用目录：有 label 时与上游 App 一致用 <label>_<pkg>，否则退回 <pkg>
     std::string app_dir = pkg;
-    if (!label.empty()) {
-        app_dir = label + "_" + pkg;
+    std::string clean = sanitize_label(label);
+    if (!clean.empty()) {
+        app_dir = clean + "_" + pkg;
     }
     return join_path(join_path(join_path(save_dir, "apps"), app_dir), name);
 }
@@ -94,9 +163,7 @@ bool read_databackup_info(const std::string& dir, DbFormatInfo* out) {
     if (parse_version_dir_name(basename_of(dir), &user, &pid)) {
         out->user = user;
         out->preserve_id = pid;
-        // 上一级目录名是包名（新格式为 label_pkg，这里取最后一段下划线之后不可靠，
-        // 真实包名以 json 为准，缺失时用目录名兜底）
-        out->pkg = basename_of(dirname_of(dir));
+        out->pkg = pkg_from_app_dir(basename_of(dirname_of(dir)));
     }
 
     std::string cfg = join_path(dir, "package_restore_config.json");
@@ -181,9 +248,94 @@ std::string find_databackup_archive(const std::string& dir, const std::string& t
     return std::string();
 }
 
+namespace {
+
+std::string sh_quote(const std::string& s) {
+    std::string out = "'";
+    for (char c : s) {
+        if (c == '\'') {
+            out += "'\\''";
+        } else {
+            out += c;
+        }
+    }
+    out += "'";
+    return out;
+}
+
+// dumpsys package 的 firstInstallTime/lastUpdateTime 在部分 ROM 上是可读日期
+// ("2026-11-07 12:34:56")，直接按数字读会只拿到年份 "2026"。这里两种都处理。
+long long parse_pkg_time(const std::string& text, const char* key) {
+    size_t pos = text.find(key);
+    if (pos == std::string::npos) return 0;
+    pos += strlen(key);
+    size_t end = pos;
+    while (end < text.size() && isdigit(static_cast<unsigned char>(text[end]))) end++;
+    std::string num = text.substr(pos, end - pos);
+    if (num.size() >= 12) return atoll(num.c_str());  // 已是 epoch ms
+
+    // 可读日期：先做字符白名单再交给 date，避免把 dumpsys 文本拼进 shell
+    size_t eol = text.find('\n', pos);
+    std::string s = trim(text.substr(pos, (eol == std::string::npos ? text.size() : eol) - pos));
+    bool safe = !s.empty();
+    for (char c : s) {
+        if (!(isdigit(static_cast<unsigned char>(c)) || c == '-' || c == ':' || c == ' ' || c == '+' ||
+              c == '.')) {
+            safe = false;
+            break;
+        }
+    }
+    if (!safe) return 0;
+    ExecResult d = run_shell("date -d '" + s + "' +%s 2>/dev/null");
+    if (d.code == 0) {
+        long long sec = atoll(trim(d.out).c_str());
+        if (sec > 1000000000LL) return sec * 1000LL;
+    }
+    return 0;
+}
+
+// 应用名（label）：CLI 没有 PackageManager.getApplicationLabel，按可靠性依次尝试。
+std::string probe_app_label(const std::string& pkg) {
+    // 1) 部分 ROM 在 packages.xml 里直接存了 label
+    ExecResult p = run_shell("grep -m1 'name=\"" + pkg + "\"' /data/system/packages.xml 2>/dev/null");
+    if (p.code == 0) {
+        size_t lp = p.out.find("label=\"");
+        if (lp != std::string::npos) {
+            lp += strlen("label=\"");
+            size_t le = p.out.find('"', lp);
+            if (le != std::string::npos && le > lp) return p.out.substr(lp, le - lp);
+        }
+    }
+    // 2) aapt dump badging：application-label:'xxx' / application-label-zh-CN:'xxx'
+    ExecResult which = run_shell("command -v aapt 2>/dev/null || command -v aapt2 2>/dev/null");
+    if (which.code == 0 && !trim(which.out).empty()) {
+        std::vector<std::string> lines = split(which.out, '\n');
+        std::string aapt = lines.empty() ? trim(which.out) : trim(lines[0]);
+        ExecResult pm = run_shell("pm path " + pkg + " 2>/dev/null | head -1");
+        std::string apk = trim(pm.out);
+        if (!apk.empty()) {
+            const std::string prefix = "package:";
+            if (apk.compare(0, prefix.size(), prefix) == 0) apk = apk.substr(prefix.size());
+            apk = trim(apk);
+            if (!apk.empty()) {
+                ExecResult b = run_shell(sh_quote(aapt) + " dump badging " + sh_quote(apk) +
+                                         " 2>/dev/null | grep -m1 '^application-label'");
+                std::string line = trim(b.out);
+                size_t q1 = line.find('\'');
+                if (q1 != std::string::npos) {
+                    size_t q2 = line.find('\'', q1 + 1);
+                    if (q2 != std::string::npos && q2 > q1 + 1) return line.substr(q1 + 1, q2 - q1 - 1);
+                }
+            }
+        }
+    }
+    return std::string();
+}
+
+}  // namespace
+
 void fill_package_display_info(const std::string& pkg, int user, DbFormatInfo* info) {
     (void)user;
-    // dumpsys 里能直接拿到的数值/时间字段
     ExecResult r = run_shell("dumpsys package " + pkg + " 2>/dev/null");
     if (r.code != 0 || trim(r.out).empty()) {
         r = run_shell("cmd package dump " + pkg + " 2>/dev/null");
@@ -210,22 +362,23 @@ void fill_package_display_info(const std::string& pkg, int user, DbFormatInfo* i
     };
     if (info->version_code == 0) info->version_code = grab_digits("versionCode=");
     if (info->version_name.empty()) info->version_name = grab_token("versionName=");
-    if (info->first_install_time == 0) info->first_install_time = grab_digits("firstInstallTime=");
-    if (info->last_update_time == 0) info->last_update_time = grab_digits("lastUpdateTime=");
-
-    // label：dumpsys 给不到，从 /data/system/packages.xml 的 label="..." 尽力读取
-    if (info->label.empty()) {
-        ExecResult p = run_shell("grep -m1 'name=\"" + pkg + "\"' /data/system/packages.xml 2>/dev/null");
-        if (p.code == 0 && !trim(p.out).empty()) {
-            std::string line = p.out;
-            size_t lp = line.find("label=\"");
-            if (lp != std::string::npos) {
-                lp += strlen("label=\"");
-                size_t le = line.find('"', lp);
-                if (le != std::string::npos) info->label = line.substr(lp, le - lp);
+    if (info->first_install_time == 0) info->first_install_time = parse_pkg_time(r.out, "firstInstallTime=");
+    if (info->last_update_time == 0) info->last_update_time = parse_pkg_time(r.out, "lastUpdateTime=");
+    // ApplicationInfo.flags：部分 ROM 的 dump 带数字形式，拿不到就留 0（恢复端仅用于判断系统应用）
+    if (info->app_flags == 0) {
+        for (const char* k : {"pkgFlags=", "applicationFlags=", "flags=0x"}) {
+            size_t pos = r.out.find(k);
+            if (pos == std::string::npos) continue;
+            pos += strlen(k);
+            if (std::string(k) == "flags=0x") {
+                info->app_flags = static_cast<long long>(strtoll(r.out.substr(pos).c_str(), nullptr, 16));
+            } else {
+                info->app_flags = grab_digits(k);
             }
+            if (info->app_flags > 0) break;
         }
     }
+    if (info->label.empty()) info->label = probe_app_label(pkg);
 }
 
 namespace {
@@ -402,11 +555,16 @@ void fill_package_permissions(const std::string& pkg, int user, int uid, DbForma
 
         const OpMapEntry* m = lookup_op(name);
         int op = -1;
-        int mode = -1;
+        // 上游 getPermissions：mode = ops?.get(op) ?: AppOpsManager.MODE_IGNORED(1)。
+        // 没有 AppOps 记录时默认 1（ignore），不是 null；模板里 21 项 mode 全是 1 就是这个默认值。
+        int mode = 1;
         if (m && op_code_verified(pkg, m->code, m->op_name, &verified)) {
             op = m->code;
             auto om = op_mode.find(m->op_name);
-            if (om != op_mode.end()) mode = appops_mode_value(om->second);
+            if (om != op_mode.end()) {
+                int v = appops_mode_value(om->second);
+                if (v >= 0) mode = v;
+            }
         }
         // 与上游过滤口径一致：能映射到 op 的，或运行时权限（危险权限）才收录
         if (op < 0 && rt == runtime.end()) continue;
@@ -515,9 +673,13 @@ bool write_md5_sidecar(const std::string& archive_path) {
 
 bool write_databackup_config(const std::string& dir, const DbFormatInfo& info,
                              const std::vector<DataEntry>& entries, const std::string& backup_dir) {
+    // 上游 PackageDataStates 的 8 个状态默认全 Selected，含义是「用户勾选了这项」，
+    // 与「该类型源目录是否存在」无关：obb/media 源不存在时依旧是 Selected。
+    // 恢复端 reload 时会按实际存在的归档重新覆盖 dataStates，所以备份端写 Selected 是安全的。
+    // 只有用户显式 --types 排除了某类型，才写 Disabled。
     auto state_of = [&](const std::string& type) -> const char* {
         for (const auto& e : entries) {
-            if (e.type == type) return e.exists ? "Selected" : "Disabled";
+            if (e.type == type) return "Selected";
         }
         return "Disabled";
     };
@@ -584,12 +746,21 @@ bool write_databackup_config(const std::string& dir, const DbFormatInfo& info,
     os << "    \"permissionState\": \"" << (info.permission_selected ? "Selected" : "Disabled") << "\",\n";
     os << "    \"ssaidState\": \"" << (info.ssaid_selected ? "Selected" : "Disabled") << "\"\n";
     os << "  },\n";
-    // 上游语义：dataStats 是设备上的原始大小，displayStats 是归档（压缩后）大小
+    // 上游语义（backupApk/backupData 里 setDataBytes / setDisplayBytes）：
+    //   dataStats    = calculateSize(src)  打包前源目录原始字节数（含随后被 --exclude 排除的项）
+    //   displayStats = calculateSize(dst)  压缩后归档 .tar.zst 的文件大小
+    // 实测三个样本：displayStats.<type>Bytes 与归档文件字节数逐个精确相等。
     auto stats_block = [&](bool raw) {
         auto pick = [&](const std::string& type) -> uint64_t {
             for (const auto& e : entries) {
                 if (e.type != type) continue;
-                return raw ? (e.raw_bytes > 0 ? e.raw_bytes : e.bytes) : e.bytes;
+                if (!raw) return e.bytes;                        // displayStats：归档大小
+                // 上游对 USER 刻意跳过 calculateSize（海量小文件遍历要几十秒且发热），
+                // 用归档大小回填 dataBytes → dataStats.userBytes == displayStats.userBytes。
+                // 三个独立样本都验证了这一点。
+                if (e.type == kDataTypeUser) return e.bytes;
+                if (e.src_bytes > 0) return e.src_bytes;         // dataStats：源目录大小
+                return e.raw_bytes > 0 ? e.raw_bytes : e.bytes;  // 兜底：tar --totals 原始大小
             }
             return 0;
         };

@@ -32,7 +32,8 @@ struct SysBackupOpt {
     bool follow_symlinks = false;       // -h（默认关，对齐上游 readFollowSymlinks 默认）
     bool apk_mode = false;              // 只打 srcDir 顶层的 *.apk
     Compression compression = Compression::Zstd;
-    int level = 1;                      // 与上游默认压缩等级 1 一致
+    int level = 1;                      // 与上游默认压缩等级 1 一致（readCompressionLevel）
+    int threads = 2;                    // zstd -T<threads>，与上游 readCompressionThreads 默认 2 一致
     bool* skipped = nullptr;            // APK 模式下目录里没有 .apk 时置 true（不算失败）
 };
 

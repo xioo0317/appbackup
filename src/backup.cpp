@@ -1,5 +1,6 @@
 #include "backup.h"
 
+#include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -42,10 +43,12 @@ const char* ct_enum_name(Compression c) {
     }
 }
 
-// 排除项唯一来源，逐条对齐上游 PackagesBackupUtil.backupData：
+// 排除项唯一来源，逐条对齐上游 PackagesBackupUtil.backupData + 实际样本：
 //   USER / USER_DE：<pkg>/.ota、cache、lib、code_cache、no_backup
-//   DATA / OBB / MEDIA：<pkg>/cache + Backup_*
+//   DATA / OBB / MEDIA：<pkg>/cache、Backup_*、.trashed-*、.pending-*、.Trashed-*、.Pending-*
 //   APK：无
+// 后四项是外部存储的回收站/待安装临时文件命名，在开源 main 分支的 backupData 里没有，
+// 但两个独立样本和用户模板的 excl= 都稳定出现，属于该版本默认（或设置里追加）的规则。
 // 这份列表同时用于系统 tar 的 --exclude= 与 manifest 的 excl= 字段，保证两边口径一致。
 std::vector<std::string> build_exclusions(const std::string& type, const std::string& pkg) {
     std::vector<std::string> v;
@@ -55,9 +58,40 @@ std::vector<std::string> build_exclusions(const std::string& type, const std::st
         }
     } else if (type == kDataTypeData || type == kDataTypeObb || type == kDataTypeMedia) {
         v.push_back(pkg + "/cache");
-        v.push_back("Backup_*");
+        for (const char* pat : {"Backup_*", ".trashed-*", ".pending-*", ".Trashed-*", ".Pending-*"}) {
+            v.push_back(pat);
+        }
     }
     return v;
+}
+
+// 源目录里所有普通文件的大小总和（不跟随符号链接、不剪枝）。
+// 上游 dataStats 取的是 calculateSize(src)：打包前源目录的原始字节数，
+// 包含随后被 --exclude 排除的 cache/lib 等，所以这里不能按 excl 剪枝。
+uint64_t dir_total_bytes(const std::string& root) {
+    uint64_t total = 0;
+    std::vector<std::string> stack{root};
+    while (!stack.empty()) {
+        std::string d = stack.back();
+        stack.pop_back();
+        DIR* dp = opendir(d.c_str());
+        if (!dp) continue;
+        struct dirent* de;
+        while ((de = readdir(dp)) != nullptr) {
+            std::string name = de->d_name;
+            if (name == "." || name == "..") continue;
+            std::string p = d + "/" + name;
+            struct stat st;
+            if (lstat(p.c_str(), &st) != 0) continue;
+            if (S_ISDIR(st.st_mode)) {
+                stack.push_back(p);
+            } else if (S_ISREG(st.st_mode)) {
+                total += static_cast<uint64_t>(st.st_size);
+            }
+        }
+        closedir(dp);
+    }
+    return total;
 }
 
 std::vector<std::string> prune_names_for(const std::string& type) {
@@ -147,8 +181,20 @@ int run_backup(const BackupOptions& opt) {
     fill_package_display_info(opt.pkg, opt.user, &info);
 
     // 主备份目录固定为 user_<userId>（不带 @preserveId）。
-    // 应用目录默认 <pkg>（与上游 archivesRelativeDir 一致），--label 可切成 <label>_<pkg>。
-    std::string dir_label = opt.label == "auto" ? info.label : opt.label;
+    // 应用目录默认 <label>_<pkg>（与上游 App 产物一致）；--label plain 可退回纯 <pkg>。
+    std::string dir_label;
+    if (opt.label == "plain") {
+        dir_label.clear();
+    } else if (opt.label == "auto") {
+        dir_label = info.label;
+        if (dir_label.empty()) {
+            log_warn("未取到应用名，目录退回 apps/<pkg>；可用 --label <应用名> 指定以对齐上游命名");
+        }
+    } else {
+        dir_label = opt.label;
+    }
+    // 上游 config 的 packageInfo.label 与目录前缀同源；显式 --label / 采集成功时都写进 config。
+    if (!dir_label.empty() && info.label.empty()) info.label = dir_label;
     std::string dest = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, 0, dir_label);
     if (opt.preserve && path_exists(dest)) {
         long long pid = epoch_millis();
@@ -171,7 +217,7 @@ int run_backup(const BackupOptions& opt) {
     maybe_kill(opt.pkg, opt.user, opt.kill);
 
     const std::string ext = std::string(".tar") + compression_suffix(opt.compression);
-    const ManifestParams mparams_base{ct_enum_name(opt.compression), opt.level, 1, false, {}};
+    const ManifestParams mparams_base{ct_enum_name(opt.compression), opt.level, opt.threads, false, {}};
 
     std::vector<DataEntry> entries;
     uint64_t total_bytes = 0;
@@ -202,6 +248,9 @@ int run_backup(const BackupOptions& opt) {
 
         entry.exists = true;
         entry.src_path = plan.src;
+        // config.dataStats：打包前源目录原始大小。USER 例外——上游刻意跳过 calculateSize
+        // （海量小文件遍历要几十秒且发热），用归档大小回填，见 write_databackup_config。
+        if (type != kDataTypeUser) entry.src_bytes = dir_total_bytes(plan.src);
         entry.context = selinux_get_context(plan.src);
         entry.gid = static_cast<long>(gid_of_path(plan.src));
         entry.archive = type + ext;
@@ -243,6 +292,7 @@ int run_backup(const BackupOptions& opt) {
         sopt.dst = dst;
         sopt.compression = opt.compression;
         sopt.level = opt.level;
+        sopt.threads = opt.threads;
         bool skipped_no_apk = false;
         if (type == kDataTypeApk) {
             sopt.apk_mode = true;
@@ -295,21 +345,27 @@ int run_backup(const BackupOptions& opt) {
         return 1;
     }
 
-    // 权限与 SSAID：上游把这两项也写进 package_restore_config.json（dataStates 里标记 Selected），
-    // 恢复时先 appops reset 再逐条 grant/revoke + setMode，并按 ssaid 改 settings_ssaid.xml。
-    // 我们同样采集，保证产出的备份能被上游 App 完整恢复。
+    // 权限与 SSAID：上游 PackageDataStates 默认 8 项全 Selected，恢复时按状态执行
+    // appops reset → 逐条 grant/revoke + setMode，以及写 settings_ssaid.xml。
+    // 这里默认也写 Selected（与模板一致）；只有在采集不到内容时才退回 Disabled，
+    // 避免上游先做 appops reset 却没有任何权限可回填，把设备现有权限清空。
     if (uid > 0) {
         fill_package_permissions(opt.pkg, opt.user, uid, &info);
         info.ssaid = read_ssaid_value(opt.user, uid);
-        // 只有真的采集到内容才标记 Selected：否则上游恢复会先 appops reset 把现有权限清掉
-        info.permission_selected = !info.permissions.empty();
-        info.ssaid_selected = !info.ssaid.empty();
+        info.permission_selected = opt.backup_permissions && !info.permissions.empty();
+        info.ssaid_selected = opt.backup_ssaid && !info.ssaid.empty();
         log_info("permissions: %zu 项, ssaid: %s", info.permissions.size(),
                  info.ssaid.empty() ? "(空)" : info.ssaid.c_str());
     } else {
         info.permission_selected = false;
         info.ssaid_selected = false;
         log_warn("uid 未知，跳过权限/SSAID 采集");
+    }
+    if (opt.backup_permissions && !info.permission_selected) {
+        log_warn("权限采集为空，permissionState 记为 Disabled（避免上游恢复时误清空权限）");
+    }
+    if (opt.backup_ssaid && !info.ssaid_selected) {
+        log_warn("SSAID 采集为空，ssaidState 记为 Disabled");
     }
 
     if (!write_databackup_config(dest, info, entries, opt.out_dir)) failed++;

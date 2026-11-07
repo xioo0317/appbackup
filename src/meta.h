@@ -34,8 +34,9 @@ struct DataEntry {
     long uid = 0;
     bool exists = false;
     uint64_t files = 0;
-    uint64_t bytes = 0;       // 归档（压缩后）大小
-    uint64_t raw_bytes = 0;   // 原始 tar 大小（上游 dataStats 口径）
+    uint64_t bytes = 0;       // 归档（压缩后）大小 → displayStats
+    uint64_t raw_bytes = 0;   // 原始 tar 大小（兜底）
+    uint64_t src_bytes = 0;   // 源目录文件大小总和（含被排除项）→ dataStats
 };
 
 // 与上游 PackagePermission 对齐：op 是 AppOps 代码（-1 == OP_NONE），mode 是 AppOps 模式

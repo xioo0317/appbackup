@@ -10,9 +10,11 @@
 namespace appbackup {
 
 // DataBackup（Android-DataBackup-custom）的备份目录结构：
-//   <saveDir>/apps/<pkg>/user_<uid>/{apk,user,user_de,data,obb,media}.tar.<suffix>
-//   <saveDir>/apps/<pkg>/user_<uid>/<type>.tar.<suffix>.md5 / .manifest
-//   <saveDir>/apps/<pkg>/user_<uid>/package_restore_config.json  (Gson 序列化的 PackageEntity)
+//   <saveDir>/apps/<label>_<pkg>/user_<uid>/{apk,user,user_de,data,obb,media}.tar.<suffix>
+//   <saveDir>/apps/<label>_<pkg>/user_<uid>/<type>.tar.<suffix>.md5 / .manifest
+//   <saveDir>/apps/<label>_<pkg>/user_<uid>/package_restore_config.json (Gson 的 PackageEntity)
+// 应用目录前缀来自 sanitizedLabel（只保留中文/英文/数字/下划线），与上游
+// PackageEntity.archivesRelativeDir 一致；取不到 label 时退回纯 <pkg>（legacy）。
 // 主备份目录是 user_<uid>；被 preserve 归档的旧版本是 user_<uid>@<preserveId>。
 // 本模块负责写/读这套结构，使两边备份可以互相恢复。
 

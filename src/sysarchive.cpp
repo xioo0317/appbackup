@@ -78,9 +78,14 @@ bool zstd_supports_priority_rt() {
     return g_zstd_priority_ok;
 }
 
-// 上游压缩参数：zstd -r -T0 --ultra -q [--priority=rt] -<level>
-std::string zstd_cmd(int level, bool with_priority) {
-    std::string c = sh_quote(toolchain::zstd()) + " -r -T0 --ultra -q";
+// 上游压缩参数（custom fork 的 CompressionType.getCompressPara）：
+//   zstd -r -q -T<threads> [-<level>] [--ultra 仅 level>=20]
+// threads 来自 readCompressionThreads()，默认 2；同时写进 .manifest 的 threads= 作参数指纹。
+// --ultra / --priority=rt 是上游 main 分支的写法，实测在 level<=19、管道 stdin 模式下
+// 与不含它们时输出字节完全相同（见 README 的字节级验证），保留不影响与上游互通。
+std::string zstd_cmd(int level, int threads, bool with_priority) {
+    if (threads < 0) threads = 0;
+    std::string c = sh_quote(toolchain::zstd()) + " -r -T" + std::to_string(threads) + " --ultra -q";
     if (with_priority && zstd_supports_priority_rt()) c += " --priority=rt";
     c += " -" + std::to_string(level);
     return c;
@@ -137,7 +142,7 @@ bool sys_backup(const SysBackupOpt& o, uint64_t* uncompressed_bytes) {
     } else {
         cmd += "{ " + tarcmd + " -cpf -" + srcs + "; echo $? > " + sh_quote(rcf) + "; } | ";
         if (o.compression == Compression::Zstd) {
-            cmd += zstd_cmd(o.level, true);
+            cmd += zstd_cmd(o.level, o.threads, true);
         } else {
             cmd += "gzip -" + std::to_string(o.level);
         }

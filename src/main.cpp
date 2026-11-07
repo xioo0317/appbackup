@@ -42,13 +42,16 @@ void print_usage() {
         "  --pkg <name>        要打包的应用包名（必填）\n"
         "  --user <n>          用户 id，默认 0\n"
         "  --types <list>      逗号分隔，默认全部：user,user_de,data,obb,media,apk\n"
-        "  --out <dir>         备份根目录，默认当前目录；会在其下建 apps/<包名>/user_<uid>\n"
+        "  --out <dir>         备份根目录，默认当前目录；会在其下建 apps/<应用名>_<包名>/user_<uid>\n"
         "  --compress <mode>   zstd（默认）/ none；DataBackup 不支持 gzip\n"
         "  --level <n>         zstd 压缩等级 1-19，默认 1（与 DataBackup 默认一致）\n"
+        "  --threads <n>       .manifest 的 threads=，默认 2（与上游样本一致）\n"
         "  --preserve          已有主备份时先归档为 user_<uid>@<时间戳>\n"
         "  --no-incremental    不读 .manifest 指纹，强制全量重打\n"
-        "  --label <t|auto>    应用目录命名：默认 apps/<pkg>；auto 用设备 label 前缀（<label>_<pkg>）\n"
+        "  --label <值>        应用目录前缀：auto（默认，取应用名）/ plain（纯包名）/ 自定义文本\n"
         "  --kill <mode>       打包前停进程：none（默认）/ am / kill\n"
+        "  --no-permissions    config 里 permissionState 记 Disabled（备份与恢复共用此开关）\n"
+        "  --no-ssaid          config 里 ssaidState 记 Disabled（备份与恢复共用此开关）\n"
         "\n"
         "restore 选项:\n"
         "  --in <dir>          备份目录：版本目录 / 应用目录 / 备份根目录均可，自动下探到最新版本\n"
@@ -82,7 +85,7 @@ void print_usage() {
         "示例:\n"
         "  %s backup --pkg com.tencent.mm --out /sdcard/DataBackup --kill am\n"
         "  %s backup --pkg com.tencent.mm --out /sdcard/DataBackup --preserve --level 3\n"
-        "  %s restore --in /sdcard/DataBackup/apps/com.tencent.mm/user_0 --install-apk --clean\n"
+        "  %s restore --in /sdcard/DataBackup/apps/微信_com.tencent.mm/user_0 --install-apk --clean\n"
         "  %s restore --in /sdcard/DataBackup --pkg com.tencent.mm --clean\n",
         kToolName, kToolVersion, kToolName, kToolName, kToolName, kToolName, kToolName, kToolName, kToolName,
         kToolName, kToolName);
@@ -156,14 +159,18 @@ int main(int argc, char** argv) {
             bopt.preserve = true;
         } else if (a == "--no-incremental") {
             bopt.incremental = false;
+        } else if (a == "--threads") {
+            bopt.threads = atoi(next("--threads").c_str());
+            if (bopt.threads < 0) bopt.threads = 0;
+            if (bopt.threads > 256) bopt.threads = 256;
         } else if (a == "--label") {
-            // 应用目录命名：默认 apps/<pkg>/user_N；--label auto 用设备探测到的 label 做前缀
+            // 默认 auto：apps/<应用名>_<pkg>/user_N；plain 退回 apps/<pkg>/user_N
             bopt.label = next("--label");
         } else if (a == "--format") {
             // 只有 DataBackup 一种输出格式，--format 仅作旧脚本兼容占位，忽略具体取值
             std::string f = next("--format");
             if (f != "databackup" && f != "db") {
-                log_warn("--format %s 已忽略：工具只产出 DataBackup 结构（apps/<包名>/user_<uid>/）", f.c_str());
+                log_warn("--format %s 已忽略：工具只产出 DataBackup 结构（apps/<应用名>_<包名>/user_<uid>/）", f.c_str());
             }
         } else if (a == "--kill") {
             std::string m = next("--kill");
@@ -193,8 +200,10 @@ int main(int argc, char** argv) {
             ropt.verify_owner = false;
         } else if (a == "--no-permissions") {
             ropt.restore_permissions = false;
+            bopt.backup_permissions = false;
         } else if (a == "--no-ssaid") {
             ropt.restore_ssaid = false;
+            bopt.backup_ssaid = false;
         } else if (a == "--no-checksum") {
             ropt.verify_checksum = false;
         } else if (a == "--force-checksum") {

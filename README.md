@@ -3,15 +3,15 @@
 Android 应用数据 **打包 / 恢复** 命令行工具（C++17，需 root）。
 
 参照 [Android-DataBackup-custom](https://github.com/boluo4169-commits/Android-DataBackup-custom)（v3.15.2）的
-备份/恢复流程实现，但去掉 Kotlin/Gradle 依赖，做成一个静态小体积可执行文件：
-`tar` 的读写由本工具自己实现（ustar + pax 扩展头），不依赖系统 `tar`；
-压缩支持 **zstd** / 不压缩，其中 zstd 与 DataBackup 的 `.tar.zst` 完全互通。
+备份/恢复流程实现，但去掉 Kotlin/Gradle 依赖，做成单个可执行文件。
+**不手写 tar**：把上游 `assets/bin.zip` 里的 GNU tar + zstd 按 ABI 内嵌进可执行文件，运行时释放后调用，
+因此归档字节与上游同源（详见 [prebuilt/README.md](prebuilt/README.md)）。
 
-**与 DataBackup 双向兼容**：备份直接产出它认识的目录结构（`apps/<pkg>/user_<uid>/`，含
+**与 DataBackup 双向兼容**：备份直接产出它认识的目录结构（`apps/<应用名>_<包名>/user_<uid>/`，含
 `package_restore_config.json`、`.md5` 与 `.manifest`），它能识别、扫描并恢复；
 反过来，本工具也能直接恢复它生成的备份目录。
 
-> **v2.1.0：备份逻辑按上游重写，废弃自有格式**。只产出 DataBackup 的 `apps/<pkg>/user_<uid>/` 结构，
+> **v2.1.0：备份逻辑按上游重写，废弃自有格式**。只产出 DataBackup 的 `apps/<应用名>_<包名>/user_<uid>/` 结构，
 > 每个归档配 `.md5` + `.manifest` 三件套，`package_restore_config.json` 按 Gson 的 PackageEntity 写全，
 > 增量指纹与上游同口径；`meta.json` 与 `--format` 不再生成，`restore` 对旧备份保持只读兼容。
 >
@@ -68,7 +68,12 @@ APK 那一路是 `tar -C <apk 父目录> -cpf - ./*.apk`，所以 **apk.tar 的�
 ```
 
 `preserveId` 是保留版本的毫秒时间戳；主备份（最新一份）用 `user_<uid>` 不带 `@`。
-`<label>_` 前缀可以省略，扫描时对纯包名目录（legacy 格式）同样识别。
+`<label>_` 前缀**默认开启**，与上游 `PackageEntity.archivesRelativeDir` 一致：
+`sanitizedLabel = label.replace(Regex("[^\\u4e00-\\u9fa5A-Za-z0-9_]"), "").trim('_')`
+（只保留中文/英文/数字/下划线，空格和斜杠直接删除）。取不到应用名、或显式 `--label plain` 时
+退回纯包名目录（legacy 格式）；`list` / `restore` 对两种目录都能识别。
+CLI 取 label 依次尝试 `/data/system/packages.xml` 的 `label=` 属性、`aapt dump badging <base.apk>`
+的 `application-label:`，都没有时可用 `--label <应用名>` 显式指定。
 
 ### 4. 排除项（`PackagesBackupUtil.buildExclusionAndPrune`）
 
@@ -172,7 +177,7 @@ dex/oat 与 ABI 不匹配；`lib` 同理（原生库由 APK 安装时按目标 A
 | tar | 调用自带 GNU tar | **同一份** GNU tar（从上游 `assets/bin.zip` 提取后内嵌） |
 | 压缩 | zstd / lz4 / tar | zstd / tar（DataBackup 不认 gzip，所以不产出 gzip） |
 | 入口 | GUI | 命令行 |
-| 备份目录 | `apps/<pkg>/user_<uid>/` + `@<ts>` 保护版本 | **完全一致** |
+| 备份目录 | `apps/<应用名>_<包名>/user_<uid>/` + `@<ts>` 保护版本 | **完全一致** |
 | 归档三件套 | `<type>.tar.zst` + `.md5` + `.manifest` | **完全一致** |
 | 增量 | 源清单哈希比对 | 同款 `find -printf \| sort \| sha256sum` 口径 |
 | 额外 | — | 路径穿越防护、硬链接去重、主备份就地更新先写 `.part` 再 rename |
@@ -209,8 +214,9 @@ CI 只产出一个 `appbackup-arm64-v8a.zip`。
 
 ```
 appbackup backup  --pkg <包名> [--user 0] [--types user,user_de,data,obb,media,apk]
-                    [--out DIR] [--compress zstd|none] [--level N]
-                    [--preserve] [--no-incremental] [--kill none|am|kill]
+                    [--out DIR] [--compress zstd|none] [--level N] [--threads N]
+                    [--label auto|plain|<应用名>] [--preserve] [--no-incremental]
+                    [--kill none|am|kill]
 appbackup restore --in <备份目录> [--pkg <包名>] [--user 0] [--types ...]
                     [--clean] [--install-apk] [--no-selinux] [--no-verify]
                     [--no-checksum] [--force-checksum]
@@ -229,7 +235,7 @@ su -c './appbackup backup --pkg com.tencent.mm --out /sdcard/DataBackup --preser
 
 ```
 /sdcard/DataBackup/
-└── apps/com.tencent.mm/
+└── apps/微信_com.tencent.mm/         # 目录名 = sanitizedLabel + "_" + 包名
     ├── user_0/                       # 主备份（不带 @；--preserve 时旧目录变 user_0@<毫秒时间戳>）
     │   ├── apk.tar.zst               # 顶层就是 ./base.apk、./split_config.*.apk
     │   ├── apk.tar.zst.md5           # 32 位十六进制，DataBackup 恢复前校验
@@ -245,13 +251,65 @@ su -c './appbackup backup --pkg com.tencent.mm --out /sdcard/DataBackup --preser
     └── user_0@1794056351000/         # 上一份（--preserve 时）
 ```
 
-- **源不存在的类型不产出归档**，`dataStates` 里对应项写 `Disabled`；DataBackup 打开这份备份时不会去找不存在的文件。
+- **源不存在的类型不产出归档**；`dataStates` 里对应项仍写 `Selected`（上游默认 8 项全选，
+  状态含义是「用户勾选」而非「源存在」）。上游扫描恢复时会按实际归档重建状态，不会去找不存在的文件。
 - **`.manifest` 的 hash** 是 `find [-L] <src> [-maxdepth 1] <prune> -type f -printf '%P|%s|%T@\n' | LC_ALL=C sort | sha256sum`。
   本工具不走 shell（Android 的 toybox `find` 未必支持 `-printf`），在 C++ 里按同一口径遍历、排序、SHA-256，
   与 GNU find 管道**逐字节一致**（自测里直接跟 `find | sort | sha256sum` 对比过）。
 - **增量**：归档旁有 `.manifest`、指纹与打包参数（ct/level/threads/follow/excl）都没变、归档还在 → 该类型跳过重打。
   `--no-incremental` 强制全量；manifest 缺失/解析失败/读源失败一律按「已变化」全量，不会漏打。
 - **就地更新安全**：先写 `<type>.tar.zst.part`，成功后才 rename 覆盖，中途失败不会截断上一份好归档。
+
+#### 旁挂文件与配置文件的生成原理
+
+以 `obb.tar.zst.manifest` 为例，字段全部来自上游 `IncrementalBackupUtil.serialize`：
+
+```
+v=1                  文件格式版本（MANIFEST_VERSION）
+hash=<64位小写hex>    源目录文件清单的 SHA-256（不是归档内容的哈希；归档的哈希是 .md5）
+ct=ZSTD              CompressionType.name（TAR / ZSTD / LZ4）
+level=1              readCompressionLevel()，默认 1
+threads=2            readCompressionThreads()，默认 2 → zstd 的 -T<threads>
+follow=false         readFollowSymlinks()，对应 tar -h
+excl=...             排除清单，用 | 连接；与 tar --exclude= 同一份列表
+```
+
+- `hash` 的算法：`find <src> [-maxdepth 1] [-path <prune> -prune -o] -type f
+  -printf '%P|%s|%T@\n' | LC_ALL=C sort | sha256sum`。只 stat 不读文件内容，
+  清单是「相对路径|大小|mtime」，排序后哈希。**空目录/全被排除 → 空清单 → 空串的 SHA-256
+  `e3b0c442...855`**（模板里 obb 的 hash 就是这个值）。剪枝只对常量目录名做（与 --exclude 的目录项一一对应），
+  glob 类（Backup_*、.trashed-*）不进剪枝：walk 集合是 tar 集合的超集，宁可白打不可漏打。
+- `excl` 与 tar 同源（`buildExclusionAndPrune`）：
+  - USER / USER_DE：`<pkg>/.ota|<pkg>/cache|<pkg>/lib|<pkg>/code_cache|<pkg>/no_backup`
+  - DATA / OBB / MEDIA：`<pkg>/cache|Backup_*|.trashed-*|.pending-*|.Trashed-*|.Pending-*`
+    （后四项是 `PathUtil.TrashedFilePatterns`，外部存储的回收站/待安装临时文件）
+  - APK：空（tar 只收顶层 `*.apk`）
+- `threads` 是**设置项**不是设备核数：默认 2（`readCompressionThreads` 的 defValue），用户可在设置里改。
+  它同时进 zstd 命令（`-T<threads>`）和 manifest 参数指纹。例外：用户改设置、不同版本默认值、
+  或关闭自定义线程。实测在管道 stdin + level 1 下，`-T0/-T1/-T2` 与带/不带 `--ultra --priority=rt`
+  生成的 `.tar.zst` **字节完全相同**，所以它不改变归档内容，只影响压缩耗时/发热与增量判定。
+  CLI 对应 `--threads <n>`（默认 2）。
+- `.md5` = 压缩后归档文件的 MD5（32 位 hex），恢复前校验完整性；与 `hash` 完全不同。
+
+`package_restore_config.json` 是上游 `PackageEntity` 的 Gson 序列化（`GsonBuilder().setPrettyPrinting()`），
+备份成功后由 `AbstractBackupService` 写：`restoreEntity = p.copy(id = 旧 RESTORE 记录 id ?: 0,
+indexInfo = p.indexInfo.copy(opType = RESTORE, cloud, backupDir), extraInfo = p.extraInfo.copy(activated = false))`。
+
+| 字段块 | 来源 |
+| --- | --- |
+| `id` | Room 数据库 `@PrimaryKey(autoGenerate)`；首次备份无旧记录 → 0（本工具写 0） |
+| `indexInfo` | 任务/设置：opType 固定 RESTORE、packageName、userId、compressionType、preserveId=0、cloud、backupDir |
+| `packageInfo` | `PackageManager.getPackageInfo`：label、versionName、versionCode、flags、firstInstallTime、lastUpdateTime |
+| `extraInfo` | uid、permissions（`requestedPermissions` + granted 标志 + AppOps op/mode，无记录时 mode 默认 `MODE_IGNORED=1`）、ssaid（settings_ssaid.xml）、lastBackupTime=当前时间戳、blocked/activated/firstUpdated/enabled |
+| `dataStates` | `PackageDataStates` 默认 8 项全 Selected = 用户勾选状态 |
+| `storageStats` | `StorageStats` 系统 API；备份时通常全 0，恢复时才回填 |
+| `dataStats` | `calculateSize(src)` 源目录原始大小；**USER 例外**：上游刻意跳过（海量小文件遍历要几十秒），用归档大小回填 → 与 displayStats 相等 |
+| `displayStats` | `calculateSize(dst)` 归档（压缩后）文件大小；实测与 `.tar.zst` 字节数逐个精确相等 |
+
+上游恢复时会重新扫描目录并覆盖 `indexInfo.packageName/userId/preserveId`、按实际归档重建 `dataStates`，
+所以 JSON 的键顺序、缩进、id 都不影响识别（Gson 按名字读）。CLI 与 App 的差别只在「怎么采集」：
+App 用 Java API（`PackageManager`、`AppOpsManager`、`getApplicationLabel`），CLI 用
+`dumpsys package` / `cmd package dump` / `aapt dump badging` / `appops get` / 直接读 `settings_ssaid.xml`。
 
 #### 恢复（换机）
 
