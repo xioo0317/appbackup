@@ -10,9 +10,10 @@
 namespace appbackup {
 
 // DataBackup（Android-DataBackup-custom）的备份目录结构：
-//   <saveDir>/apps/<label>_<pkg>/user_<uid>@<preserveId>/{apk,user,user_de,data,obb,media}.tar.zst
-//   <saveDir>/apps/<label>_<pkg>/user_<uid>@<preserveId>/package_restore_config.json  (Gson 序列化的 PackageEntity)
-//   <saveDir>/apps/.../<type>.tar.zst.md5
+//   <saveDir>/apps/<pkg>/user_<uid>/{apk,user,user_de,data,obb,media}.tar.<suffix>
+//   <saveDir>/apps/<pkg>/user_<uid>/<type>.tar.<suffix>.md5 / .manifest
+//   <saveDir>/apps/<pkg>/user_<uid>/package_restore_config.json  (Gson 序列化的 PackageEntity)
+// 主备份目录是 user_<uid>；被 preserve 归档的旧版本是 user_<uid>@<preserveId>。
 // 本模块负责写/读这套结构，使两边备份可以互相恢复。
 
 struct DbFormatInfo {

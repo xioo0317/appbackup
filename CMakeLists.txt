@@ -52,6 +52,9 @@ set(APP_SOURCES
     src/sink.cpp
     src/fsops.cpp
     src/md5.cpp
+    src/sha256.cpp
+    src/fingerprint.cpp
+    src/manifest.cpp
     src/tar_writer.cpp
     src/tar_reader.cpp
     src/selinux.cpp
@@ -97,6 +100,9 @@ if(APP_BUILD_TESTS AND NOT ANDROID)
         src/sink.cpp
         src/fsops.cpp
         src/md5.cpp
+        src/sha256.cpp
+        src/fingerprint.cpp
+        src/manifest.cpp
         src/tar_writer.cpp
         src/tar_reader.cpp
         src/selinux.cpp

@@ -39,10 +39,12 @@ void print_usage() {
         "  --pkg <name>        要打包的应用包名（必填）\n"
         "  --user <n>          用户 id，默认 0\n"
         "  --types <list>      逗号分隔，默认全部：user,user_de,data,obb,media,apk\n"
-        "  --out <dir>         备份根目录，默认当前目录；会在其下建 <包名>_<时间戳>\n"
-        "  --compress <mode>   zstd（默认）/ gzip / none\n"
+        "  --out <dir>         备份根目录，默认当前目录；会在其下建 apps/<包名>/user_<uid>\n"
+        "  --compress <mode>   zstd（默认）/ none；DataBackup 不支持 gzip\n"
+        "  --level <n>         zstd 压缩等级 1-19，默认 1（与 DataBackup 默认一致）\n"
+        "  --preserve          已有主备份时先归档为 user_<uid>@<时间戳>\n"
+        "  --no-incremental    不读 .manifest 指纹，强制全量重打\n"
         "  --kill <mode>       打包前停进程：none（默认）/ am / kill\n"
-        "  --format <fmt>      appbackup（默认）或 databackup：后者直接生成 DataBackup 能识别并恢复的目录结构\n"
         "\n"
         "restore 选项:\n"
         "  --in <dir>          备份目录：版本目录 / 应用目录 / 备份根目录均可，自动下探到最新版本\n"
@@ -71,10 +73,10 @@ void print_usage() {
         "  apk      pm path 的父目录下所有 *.apk\n"
         "\n"
         "示例:\n"
-        "  %s backup --pkg com.tencent.mm --out /sdcard/appbackup --kill am\n"
-        "  %s backup --pkg com.tencent.mm --out /sdcard/DataBackup --format databackup\n"
-        "  %s restore --in /sdcard/appbackup/com.tencent.mm_20260101_120000 --install-apk --clean\n"
-        "  %s restore --in /sdcard/DataBackup/apps/com.tencent.mm/user_0@1767225600000 --clean\n",
+        "  %s backup --pkg com.tencent.mm --out /sdcard/DataBackup --kill am\n"
+        "  %s backup --pkg com.tencent.mm --out /sdcard/DataBackup --preserve --level 3\n"
+        "  %s restore --in /sdcard/DataBackup/apps/com.tencent.mm/user_0 --install-apk --clean\n"
+        "  %s restore --in /sdcard/DataBackup --pkg com.tencent.mm --clean\n",
         kToolName, kToolVersion, kToolName, kToolName, kToolName, kToolName, kToolName, kToolName, kToolName,
         kToolName);
 }
@@ -139,16 +141,17 @@ int main(int argc, char** argv) {
                 return 2;
             }
             bopt.compression = c;
+        } else if (a == "--level") {
+            bopt.level = atoi(next("--level").c_str());
+            if (bopt.level < 1) bopt.level = 1;
+            if (bopt.level > 19) bopt.level = 19;
+        } else if (a == "--preserve") {
+            bopt.preserve = true;
+        } else if (a == "--no-incremental") {
+            bopt.incremental = false;
         } else if (a == "--format") {
-            std::string f = next("--format");
-            if (f == "appbackup" || f == "ozj") {  // 兼容旧格式名
-                bopt.databackup_format = false;
-            } else if (f == "databackup" || f == "db") {
-                bopt.databackup_format = true;
-            } else {
-                fprintf(stderr, "未知格式（appbackup / databackup）\n");
-                return 2;
-            }
+            fprintf(stderr, "--format 已废弃：现在只产出 DataBackup 结构（apps/<包名>/user_<uid>/）\n");
+            return 2;
         } else if (a == "--kill") {
             std::string m = next("--kill");
             if (m == "none") bopt.kill = KillMode::None;

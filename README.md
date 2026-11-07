@@ -5,15 +5,17 @@ Android 应用数据 **打包 / 恢复** 命令行工具（C++17，需 root）�
 参照 [Android-DataBackup-custom](https://github.com/boluo4169-commits/Android-DataBackup-custom)（v3.15.2）的
 备份/恢复流程实现，但去掉 Kotlin/Gradle 依赖，做成一个静态小体积可执行文件：
 `tar` 的读写由本工具自己实现（ustar + pax 扩展头），不依赖系统 `tar`；
-压缩支持 **zstd** / gzip / 不压缩，其中 zstd 与 DataBackup 的 `.tar.zst` 完全互通。
+压缩支持 **zstd** / 不压缩，其中 zstd 与 DataBackup 的 `.tar.zst` 完全互通。
 
-**与 DataBackup 双向兼容**：`--format databackup` 直接生成它认识的目录结构（含 `package_restore_config.json`
-与 `.md5`），它能识别并恢复；反过来，本工具也能直接恢复它生成的备份目录。
+**与 DataBackup 双向兼容**：备份直接产出它认识的目录结构（`apps/<pkg>/user_<uid>/`，含
+`package_restore_config.json`、`.md5` 与 `.manifest`），它能识别、扫描并恢复；
+反过来，本工具也能直接恢复它生成的备份目录。
 
-> **v2.0.0 起项目更名为 `appbackup`**（原名 `ozj-appdata`）。可执行文件、CMake 工程名、命名空间、
-> 归档里 `meta.json` 的 `tool` 字段、CI 产物名统一改为 `appbackup`；`--format` 的默认值改为
-> `appbackup`，旧参数 `--format ozj` 仍然接受。备份目录结构没有变化，旧版本生成的备份可直接用
-> `appbackup restore` 恢复。
+> **v2.1.0：备份逻辑按上游重写，废弃自有格式**。只产出 DataBackup 的 `apps/<pkg>/user_<uid>/` 结构，
+> 每个归档配 `.md5` + `.manifest` 三件套，`package_restore_config.json` 按 Gson 的 PackageEntity 写全，
+> 增量指纹与上游同口径；`meta.json` 与 `--format` 不再生成，`restore` 对旧备份保持只读兼容。
+>
+> v2.0.0 起项目更名为 `appbackup`（原名 `ozj-appdata`），可执行文件 / CMake 工程名 / 命名空间 / CI 产物名统一。
 
 ---
 
@@ -61,7 +63,8 @@ APK 那一路是 `tar -C <apk 父目录> -cpf - ./*.apk`，所以 **apk.tar 的�
 ├── data.tar.zst
 ├── obb.tar.zst
 ├── media.tar.zst
-└── <每个归档>.md5                   # 恢复前校验完整性
+├── <每个归档>.md5                   # 恢复前校验完整性
+└── <每个归档>.manifest              # 增量指纹：源清单哈希 + 打包参数
 ```
 
 `preserveId` 是保留版本的毫秒时间戳；主备份（最新一份）用 `user_<uid>` 不带 `@`。
@@ -165,12 +168,17 @@ dex/oat 与 ABI 不匹配；`lib` 同理（原生库由 APK 安装时按目标 A
 
 | 项 | DataBackup | appbackup |
 | --- | --- | --- |
-| 形态 | Android App（Kotlin + Compose） | 单个 C++ 可执行文件（约 1 MB，静态链 zstd） |
+| 形态 | Android App（Kotlin + Compose） | 单个 C++ 可执行文件（约 1.2 MB，静态链 zstd） |
 | tar | 调用系统 `tar` | 自己实现 ustar + pax 读写 |
-| 压缩 | zstd / gzip / none | zstd / gzip / none，且**能读写它的 `.tar.zst`** |
+| 压缩 | zstd / lz4 / tar | zstd / tar（DataBackup 不认 gzip，所以不产出 gzip） |
 | 入口 | GUI | 命令行 |
-| 目录结构 | `apps/<label>_<pkg>/user_<uid>@<ts>/` | 默认自有结构，`--format databackup` 时完全对齐上游 |
-| 额外 | — | 路径穿越防护、硬链接去重、MD5 校验、属主二次校验 |
+| 备份目录 | `apps/<pkg>/user_<uid>/` + `@<ts>` 保护版本 | **完全一致** |
+| 归档三件套 | `<type>.tar.zst` + `.md5` + `.manifest` | **完全一致** |
+| 增量 | 源清单哈希比对 | 同款 `find -printf \| sort \| sha256sum` 口径 |
+| 额外 | — | 路径穿越防护、硬链接去重、主备份就地更新先写 `.part` 再 rename |
+
+**没有自有格式**：备份只产出 DataBackup 的目录结构，不存在 `meta.json`、也不再有 `--format` 开关。
+反过来，`restore` 仍能读旧版本生成的 `meta.json` 备份（只读兼容，便于把老备份取回来）。
 
 自实现 tar 的好处：不依赖 toybox/tar 的版本差异（Android 上 `tar` 对 pax 长路径、
 `--totals` 的支持各家 ROM 不一致），也不怕 SELinux 拦 `exec` 系统 tar。
@@ -201,8 +209,8 @@ CI 会产出 `arm64-v8a` / `armeabi-v7a` / `x86_64` 三个 ABI 的 zip。
 
 ```
 appbackup backup  --pkg <包名> [--user 0] [--types user,user_de,data,obb,media,apk]
-                    [--out DIR] [--compress zstd|gzip|none] [--kill none|am|kill]
-                    [--format appbackup|databackup]
+                    [--out DIR] [--compress zstd|none] [--level N]
+                    [--preserve] [--no-incremental] [--kill none|am|kill]
 appbackup restore --in <备份目录> [--pkg <包名>] [--user 0] [--types ...]
                     [--clean] [--install-apk] [--no-selinux] [--no-verify]
                     [--no-checksum] [--force-checksum]
@@ -213,38 +221,48 @@ appbackup info    --pkg <包名> [--user 0]
 #### 备份
 
 ```bash
-# 自有格式（默认 zstd）
-su -c './appbackup backup --pkg com.tencent.mm --out /sdcard/appbackup --kill am'
-
-# 直接写成 DataBackup 能识别的结构
-su -c './appbackup backup --pkg com.tencent.mm --out /sdcard/DataBackup --format databackup'
+su -c './appbackup backup --pkg com.tencent.mm --out /sdcard/DataBackup --kill am'
+su -c './appbackup backup --pkg com.tencent.mm --out /sdcard/DataBackup --preserve --level 3'
 ```
 
-自有格式产出：
+产出目录与 DataBackup 逐字节同构：
 
 ```
-/sdcard/appbackup/com.tencent.mm_20260101_120000/
-├── meta.json          包名 / user / 原 uid / 各类目录的 context 与 gid / 文件数 / 大小
-├── apk.tar.zst
-├── user.tar.zst
-├── user_de.tar.zst
-├── data.tar.zst
-├── obb.tar.zst
-└── media.tar.zst
+/sdcard/DataBackup/
+└── apps/com.tencent.mm/
+    ├── user_0/                       # 主备份（不带 @；--preserve 时旧目录变 user_0@<毫秒时间戳>）
+    │   ├── apk.tar.zst               # 顶层就是 ./base.apk、./split_config.*.apk
+    │   ├── apk.tar.zst.md5           # 32 位十六进制，DataBackup 恢复前校验
+    │   ├── apk.tar.zst.manifest      # 增量指纹：v/hash/ct/level/threads/follow/excl
+    │   ├── user.tar.zst
+    │   ├── user.tar.zst.md5
+    │   ├── user.tar.zst.manifest
+    │   ├── user_de.tar.zst(.md5/.manifest)
+    │   ├── data.tar.zst(.md5/.manifest)
+    │   ├── obb.tar.zst(.md5/.manifest)
+    │   ├── media.tar.zst(.md5/.manifest)
+    │   └── package_restore_config.json   # Gson 的 PackageEntity，字段与顺序同上游
+    └── user_0@1794056351000/         # 上一份（--preserve 时）
 ```
 
-`--format databackup` 产出 `apps/<pkg>/user_<uid>@<毫秒时间戳>/` + `package_restore_config.json` + 每个归档的 `.md5`，
-APK 归档按上游习惯打成顶层 `./*.apk`。DataBackup 打开「恢复」列表（或从设置里重新扫描本地备份）就能看到这一份。
+- **源不存在的类型不产出归档**，`dataStates` 里对应项写 `Disabled`；DataBackup 打开这份备份时不会去找不存在的文件。
+- **`.manifest` 的 hash** 是 `find [-L] <src> [-maxdepth 1] <prune> -type f -printf '%P|%s|%T@\n' | LC_ALL=C sort | sha256sum`。
+  本工具不走 shell（Android 的 toybox `find` 未必支持 `-printf`），在 C++ 里按同一口径遍历、排序、SHA-256，
+  与 GNU find 管道**逐字节一致**（自测里直接跟 `find | sort | sha256sum` 对比过）。
+- **增量**：归档旁有 `.manifest`、指纹与打包参数（ct/level/threads/follow/excl）都没变、归档还在 → 该类型跳过重打。
+  `--no-incremental` 强制全量；manifest 缺失/解析失败/读源失败一律按「已变化」全量，不会漏打。
+- **就地更新安全**：先写 `<type>.tar.zst.part`，成功后才 rename 覆盖，中途失败不会截断上一份好归档。
 
 #### 恢复（换机）
 
 ```bash
-# 恢复本工具的备份
-su -c './appbackup restore --in /sdcard/appbackup/com.tencent.mm_20260101_120000 --install-apk --clean'
-
-# 直接恢复 DataBackup 的备份（版本目录 / 应用目录 / 备份根目录三种都行，自动下探到最新一份）
+# 版本目录 / 应用目录 / 备份根目录三种都行，自动下探到最新一份
 su -c './appbackup restore --in /sdcard/DataBackup --pkg com.tencent.mm --install-apk --clean'
-su -c './appbackup restore --in /sdcard/DataBackup/apps/微信_com.tencent.mm --install-apk --clean'
+su -c './appbackup restore --in /sdcard/DataBackup/apps/com.tencent.mm --install-apk --clean'
+su -c './appbackup restore --in /sdcard/DataBackup/apps/com.tencent.mm/user_0 --install-apk --clean'
+
+# 旧版本自己格式的备份（meta.json）仍可直接恢复
+su -c './appbackup restore --in /sdcard/appbackup/com.tencent.mm_20260101_120000 --install-apk --clean'
 ```
 
 流程：force-stop → 装 APK（split 走会话）→ 轮询新 uid → **先记目标目录 context 再决定是否 mkdir**
@@ -257,8 +275,8 @@ su -c './appbackup restore --in /sdcard/DataBackup/apps/微信_com.tencent.mm --
 #### 其它
 
 ```bash
-su -c './appbackup info --pkg com.tencent.mm'        # 看目录、uid、gid、context
-su -c './appbackup list --in /sdcard/appbackup/xxx' # 看备份内容（两种格式都支持）
+su -c './appbackup info --pkg com.tencent.mm'                    # 看目录、uid、gid、context
+su -c './appbackup list --in /sdcard/DataBackup/apps/com.tencent.mm/user_0'
 ```
 
 ### 退出码

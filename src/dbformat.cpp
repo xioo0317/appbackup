@@ -3,6 +3,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <ctime>
 #include <fstream>
 #include <sstream>
 
@@ -14,6 +15,12 @@
 namespace appbackup {
 
 namespace {
+
+long long now_millis() {
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return static_cast<long long>(ts.tv_sec) * 1000LL + ts.tv_nsec / 1000000LL;
+}
 
 std::string json_escape(const std::string& in) {
     std::string out;
@@ -210,7 +217,7 @@ bool write_databackup_config(const std::string& dir, const DbFormatInfo& info,
     os << "    \"hasKeystore\": false,\n";
     os << "    \"permissions\": [],\n";
     os << "    \"ssaid\": \"\",\n";
-    os << "    \"lastBackupTime\": 0,\n";
+    os << "    \"lastBackupTime\": " << now_millis() << ",\n";
     os << "    \"blocked\": false,\n";
     os << "    \"activated\": false,\n";
     os << "    \"firstUpdated\": true,\n";

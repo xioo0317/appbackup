@@ -12,6 +12,8 @@
 #include "common.h"
 #include "fsops.h"
 #include "dbformat.h"
+#include "fingerprint.h"
+#include "manifest.h"
 #include "md5.h"
 #include "meta.h"
 #include "proc.h"
@@ -55,6 +57,80 @@ int main() {
     std::string base = "/tmp/appbackup_rt_" + std::to_string(getpid());
     std::string src = base + "/src";
     std::string out = base + "/out";
+    // 备份产物：清单指纹 / manifest 格式 / package_restore_config.json（对齐 DataBackup）
+    {
+        std::string bsrc = base + "/bsrc/com.demo.bk";
+        make_dirs(bsrc + "/files", 0755);
+        make_dirs(bsrc + "/cache", 0755);
+        write_text(bsrc + "/files/a.txt", "x\n");
+        write_text(bsrc + "/cache/c.bin", "c");
+
+        HashOptions hopt;
+        hopt.prune_names = {".ota", "cache", "lib", "code_cache", "no_backup"};
+        std::string h = compute_source_hash(bsrc, hopt);
+        check(h.size() == 64, "source hash length");
+
+        std::string prune;
+        for (const char* n : {".ota", "cache", "lib", "code_cache", "no_backup"}) {
+            if (!prune.empty()) prune += " -o ";
+            prune += "-path '" + bsrc + "/" + n + "'";
+        }
+        ExecResult r = run_shell("find '" + bsrc + "' \\( " + prune +
+                                 " \\) -prune -o -type f -printf '%P|%s|%T@\\n' | LC_ALL=C sort | sha256sum");
+        if (r.code == 0 && trim(r.out).size() >= 64) {
+            check(h == trim(r.out).substr(0, 64), "hash matches find -printf | sort | sha256sum");
+        } else {
+            printf("[SKIP] find unavailable, hash cross-check skipped\n");
+        }
+        check(compute_source_hash(bsrc + "/nope", hopt).empty(), "hash fails on missing dir");
+
+        ManifestParams mp;
+        mp.ct = "ZSTD";
+        mp.level = 1;
+        mp.threads = 1;
+        mp.follow = false;
+        mp.excl = {"com.demo.bk/cache", "com.demo.bk/lib"};
+        std::string text = manifest_serialize(h, mp);
+        std::string want = "v=1\nhash=" + h +
+                           "\nct=ZSTD\nlevel=1\nthreads=1\nfollow=false\n"
+                           "excl=com.demo.bk/cache|com.demo.bk/lib\n";
+        check(text == want, "manifest byte format matches upstream");
+        std::string h2;
+        ManifestParams mp2;
+        check(manifest_parse(text, &h2, &mp2) && h2 == h && manifest_params_equal(mp, mp2),
+              "manifest parse roundtrip");
+
+        std::string madir = base + "/man";
+        make_dirs(madir, 0755);
+        std::string marc = madir + "/user.tar.zst";
+        write_text(marc, "dummy");
+        check(manifest_write(marc, h, mp), "manifest sidecar written");
+        check(manifest_read(marc, &h2, &mp2) && h2 == h, "manifest sidecar read back");
+
+        std::vector<DataEntry> es;
+        DataEntry eu;
+        eu.type = kDataTypeUser;
+        eu.exists = true;
+        eu.bytes = 42;
+        es.push_back(eu);
+        std::string dir2 = base + "/db2/apps/com.demo.bk/user_0";
+        make_dirs(dir2, 0755);
+        DbFormatInfo inf;
+        inf.pkg = "com.demo.bk";
+        inf.user = 0;
+        inf.uid = 10234;
+        inf.compression_type = "ZSTD";
+        check(write_databackup_config(dir2, inf, es, base + "/db2"), "config written for main backup");
+        std::string cfg = read_all(dir2 + "/package_restore_config.json");
+        check(cfg.find("\"opType\": \"RESTORE\"") != std::string::npos, "config opType RESTORE");
+        check(cfg.find("\"preserveId\": 0") != std::string::npos, "config preserveId 0 on main dir");
+        check(cfg.find("\"userState\": \"Selected\"") != std::string::npos, "config userState Selected");
+        check(cfg.find("\"dataState\": \"Disabled\"") != std::string::npos, "config missing type Disabled");
+        check(cfg.find("\"lastBackupTime\": 0") == std::string::npos, "config lastBackupTime stamped");
+        check(cfg.find("\"userBytes\": 42") != std::string::npos, "config userBytes from archive size");
+        check(cfg.find("\"compressionType\": \"ZSTD\"") != std::string::npos, "config compressionType");
+    }
+
     rm_rf(base);
 
     make_dirs(src + "/com.demo.app/sub/deep", 0755);

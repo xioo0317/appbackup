@@ -7,10 +7,13 @@
 #include <cstring>
 #include <ctime>
 #include <memory>
+#include <vector>
 
 #include "common.h"
 #include "dbformat.h"
+#include "fingerprint.h"
 #include "fsops.h"
+#include "manifest.h"
 #include "proc.h"
 #include "selinux.h"
 #include "sink.h"
@@ -21,42 +24,82 @@ namespace appbackup {
 
 namespace {
 
-std::string timestamp_slug() {
-    time_t now = time(nullptr);
-    struct tm tmv;
-    localtime_r(&now, &tmv);
-    char buf[32];
-    snprintf(buf, sizeof(buf), "%04d%02d%02d_%02d%02d%02d", tmv.tm_year + 1900, tmv.tm_mon + 1, tmv.tm_mday,
-             tmv.tm_hour, tmv.tm_min, tmv.tm_sec);
-    return std::string(buf);
-}
-
 long long epoch_millis() {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return static_cast<long long>(ts.tv_sec) * 1000LL + ts.tv_nsec / 1000000LL;
 }
 
-// DataBackup 的排除项唯一来源：
-//   USER/USER_DE 排除 <pkg>/.ota|/cache|/lib|/code_cache|/no_backup
-//   DATA/OBB/MEDIA 排除 <pkg>/cache 及 Backup_*/回收站/写入中文件
-void fill_exclusions(const std::string& type, const std::string& pkg, TarOptions* opt) {
-    if (type == kDataTypeUser || type == kDataTypeUserDe) {
-        for (const char* sub : {".ota", "cache", "lib", "code_cache", "no_backup"}) {
-            opt->exclude_prefixes.push_back(pkg + "/" + sub);
-        }
-    } else if (type == kDataTypeData || type == kDataTypeObb || type == kDataTypeMedia) {
-        opt->exclude_prefixes.push_back(pkg + "/cache");
-        // 与 DataBackup TrashedFilePatterns 一致：回收站/写入中文件大小写两种写法都跳过
-        for (const char* g : {"Backup_*", ".trashed-*", ".pending-*", ".Trashed-*", ".Pending-*"}) {
-            opt->exclude_globs.push_back(g);
-        }
+// CompressionType 的枚举名（写进 manifest 的 ct= 与 config 的 compressionType）
+const char* ct_enum_name(Compression c) {
+    switch (c) {
+        case Compression::Zstd:
+            return "ZSTD";
+        case Compression::Gzip:
+            return "ZSTD";
+        case Compression::Plain:
+        default:
+            return "TAR";
     }
 }
 
-std::string read_prop(const std::string& key) {
-    ExecResult r = run_shell("getprop " + key);
-    return trim(r.out);
+// 排除项唯一来源，逐条对齐上游 PackagesBackupUtil.buildExclusionAndPrune：
+//   USER / USER_DE：<pkg>/.ota、cache、lib、code_cache、no_backup
+//   DATA / OBB / MEDIA：<pkg>/cache + Backup_* + 回收站/写入中文件
+//   APK：无
+// 这份列表同时用于 tar 排除与 manifest 的 excl= 字段，保证两边口径一致。
+std::vector<std::string> build_exclusions(const std::string& type, const std::string& pkg) {
+    std::vector<std::string> v;
+    if (type == kDataTypeUser || type == kDataTypeUserDe) {
+        for (const char* sub : {".ota", "cache", "lib", "code_cache", "no_backup"}) {
+            v.push_back(pkg + "/" + sub);
+        }
+    } else if (type == kDataTypeData || type == kDataTypeObb || type == kDataTypeMedia) {
+        v.push_back(pkg + "/cache");
+        v.push_back("Backup_*");
+        v.push_back(".trashed-*");
+        v.push_back(".pending-*");
+        v.push_back(".Trashed-*");
+        v.push_back(".Pending-*");
+    }
+    return v;
+}
+
+std::vector<std::string> prune_names_for(const std::string& type) {
+    if (type == kDataTypeUser || type == kDataTypeUserDe) {
+        return {".ota", "cache", "lib", "code_cache", "no_backup"};
+    }
+    if (type == kDataTypeData || type == kDataTypeObb || type == kDataTypeMedia) {
+        return {"cache"};
+    }
+    return {};
+}
+
+struct TypePlan {
+    std::string src;                 // 实际打包的源目录
+    std::string arc;                 // 归档内顶层名
+    std::vector<std::string> excl;   // manifest excl= 与 tar --exclude 同源
+    std::vector<std::string> prune;  // 清单指纹剪枝（常量目录名）
+    int max_depth = 0;               // 0 不限；1 只看顶层（APK）
+    bool flat = false;               // 顶层直接放 ./xxx（APK）
+};
+
+bool plan_for(const std::string& type, const std::string& pkg, int user, TypePlan* plan) {
+    plan->excl = build_exclusions(type, pkg);
+    plan->prune = prune_names_for(type);
+    if (type == kDataTypeApk) {
+        plan->src = package_source_dir(pkg, user);  // apk 父目录
+        plan->flat = true;
+        plan->max_depth = 1;
+        plan->arc = "apk";
+        return !plan->src.empty();
+    }
+    std::string tmpl = data_type_dir_template(type);
+    char buf[256];
+    snprintf(buf, sizeof(buf), tmpl.c_str(), user);
+    plan->src = join_path(buf, pkg);
+    plan->arc = pkg;
+    return true;
 }
 
 void maybe_kill(const std::string& pkg, int user, KillMode mode) {
@@ -77,10 +120,9 @@ int run_backup(const BackupOptions& opt) {
         log_error("backup requires --pkg");
         return 2;
     }
-    Compression compression = opt.compression;
-    if (opt.databackup_format && compression == Compression::Gzip) {
-        log_warn("DataBackup 结构只认 tar / tar.zst，gzip 会被忽略，改用 zstd");
-        compression = Compression::Zstd;
+    if (opt.compression == Compression::Gzip) {
+        log_error("DataBackup 只认 tar / tar.zst，不支持 gzip；请用 --compress zstd 或 none");
+        return 2;
     }
 
     std::vector<std::string> types = opt.types.empty() ? all_data_types() : opt.types;
@@ -100,13 +142,20 @@ int run_backup(const BackupOptions& opt) {
         log_warn("cannot resolve uid for %s (user %d); backup will still proceed", opt.pkg.c_str(), opt.user);
     }
 
-    std::string dest;
-    long long preserve_id = 0;
-    if (opt.databackup_format) {
-        preserve_id = epoch_millis();
-        dest = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, preserve_id);
-    } else {
-        dest = join_path(opt.out_dir, opt.pkg + "_" + timestamp_slug());
+    // 主备份目录固定为 user_<userId>（不带 @preserveId），与上游一致
+    std::string dest = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, 0);
+    if (opt.preserve && path_exists(dest)) {
+        long long pid = epoch_millis();
+        std::string archived = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, pid);
+        while (path_exists(archived)) {
+            pid++;
+            archived = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, pid);
+        }
+        if (rename(dest.c_str(), archived.c_str()) != 0) {
+            log_error("无法归档旧主备份 %s: %s", dest.c_str(), strerror(errno));
+            return 1;
+        }
+        log_info("旧主备份已归档为 %s", basename_of(archived).c_str());
     }
     if (!make_dirs(dest, 0755)) {
         log_error("cannot create %s", dest.c_str());
@@ -115,122 +164,152 @@ int run_backup(const BackupOptions& opt) {
 
     maybe_kill(opt.pkg, opt.user, opt.kill);
 
-    BackupMeta meta;
-    meta.tool = kToolName;
-    meta.tool_version = kToolVersion;
-    meta.pkg = opt.pkg;
-    meta.user = opt.user;
-    meta.uid = uid;
-    meta.gid = uid;
-    meta.created_at = now_iso8601();
-    meta.device = read_prop("ro.product.model");
-    meta.sdk = read_prop("ro.build.version.sdk");
-    meta.compression = compression_name(compression);
+    const std::string ext = std::string(".tar") + compression_suffix(opt.compression);
+    const ManifestParams mparams_base{ct_enum_name(opt.compression), opt.level, 1, false, {}};
 
-    std::string ext = std::string(".tar") + compression_suffix(compression);
+    std::vector<DataEntry> entries;
     uint64_t total_bytes = 0;
     uint64_t total_files = 0;
     int failed = 0;
+    int skipped_unchanged = 0;
 
     for (const auto& type : types) {
         DataEntry entry;
         entry.type = type;
         entry.uid = uid;
 
-        std::string src;
-        if (type == kDataTypeApk) {
-            std::string apk_dir = package_source_dir(opt.pkg, opt.user);
-            if (apk_dir.empty()) {
-                log_warn("apk source not found for %s", opt.pkg.c_str());
-                entry.exists = false;
-                meta.entries.push_back(entry);
-                continue;
-            }
-            src = apk_dir;
-            entry.arc_name = "apk";
-        } else {
-            std::string tmpl = data_type_dir_template(type);
-            char buf[256];
-            snprintf(buf, sizeof(buf), tmpl.c_str(), opt.user);
-            src = join_path(buf, opt.pkg);
-            entry.arc_name = opt.pkg;
-        }
-        entry.src_path = src;
+        TypePlan plan;
+        bool have_src = plan_for(type, opt.pkg, opt.user, &plan);
+        if (have_src && !path_exists(plan.src)) have_src = false;
 
-        if (!path_exists(src)) {
-            log_info("[%s] not present: %s", type.c_str(), src.c_str());
+        if (!have_src) {
+            if (type == kDataTypeUser) {
+                // 上游把 USER 缺失视为失败（应用没装好 / 数据目录没建），其余类型只算跳过
+                log_error("[user] 源不存在: %s", plan.src.c_str());
+                failed++;
+            } else {
+                log_info("[%s] 跳过（源不存在）", type.c_str());
+            }
             entry.exists = false;
-            meta.entries.push_back(entry);
+            entries.push_back(entry);
             continue;
         }
-        entry.exists = true;
-        entry.context = selinux_get_context(src);
-        entry.gid = static_cast<long>(gid_of_path(src));
 
-        // DataBackup 结构里归档固定叫 <type>.tar.<suffix>；本工具结构里加类型前缀便于阅读
-        entry.archive = opt.databackup_format ? (type + ext) : (type + ext);
+        entry.exists = true;
+        entry.src_path = plan.src;
+        entry.context = selinux_get_context(plan.src);
+        entry.gid = static_cast<long>(gid_of_path(plan.src));
+        entry.archive = type + ext;
         std::string dst = join_path(dest, entry.archive);
+
+        ManifestParams params = mparams_base;
+        params.excl = plan.excl;
+
+        std::string src_hash;
+        if (opt.incremental) {
+            HashOptions hopt;
+            hopt.max_depth = plan.max_depth;
+            hopt.prune_names = plan.prune;
+            src_hash = compute_source_hash(plan.src, hopt);
+        }
+
+        // 与上游一致的「源未变化则跳过」：manifest 存在、指纹相同、打包参数相同、归档还在
+        bool unchanged = false;
+        if (!src_hash.empty() && path_exists(dst)) {
+            std::string old_hash;
+            ManifestParams old_params;
+            if (manifest_read(dst, &old_hash, &old_params) && old_hash == src_hash &&
+                manifest_params_equal(old_params, params)) {
+                unchanged = true;
+            }
+        }
+        if (unchanged) {
+            entry.bytes = file_size(dst);
+            total_bytes += entry.bytes;
+            skipped_unchanged++;
+            if (!path_exists(dst + ".md5")) write_md5_sidecar(dst);
+            log_info("[%s] 未变化，跳过重打（%s）", type.c_str(), entry.archive.c_str());
+            entries.push_back(entry);
+            continue;
+        }
 
         TarOptions topt;
         if (type == kDataTypeApk) {
             topt.only_top_level_files = true;
             topt.file_suffix_filter = ".apk";
-            // DataBackup 的 apk.tar 顶层直接就是 ./base.apk，不能有 apk/ 前缀
-            topt.flat_root = opt.databackup_format;
+            topt.flat_root = true;
         } else {
-            fill_exclusions(type, opt.pkg, &topt);
+            for (const auto& e : plan.excl) {
+                if (e.find('*') != std::string::npos) {
+                    topt.exclude_globs.push_back(e);
+                } else {
+                    topt.exclude_prefixes.push_back(e);
+                }
+            }
         }
 
-        std::unique_ptr<Sink> sink = open_sink(dst, compression, 6);
+        // 先写 .part 再 rename：就地更新时不会因为中途失败把上一份好归档截断
+        std::string tmp = dst + ".part";
+        unlink(tmp.c_str());
+        std::unique_ptr<Sink> sink = open_sink(tmp, opt.compression, opt.level);
         if (!sink) {
-            log_error("[%s] cannot open %s", type.c_str(), dst.c_str());
+            log_error("[%s] 无法写入 %s", type.c_str(), tmp.c_str());
             failed++;
-            meta.entries.push_back(entry);
+            entries.push_back(entry);
             continue;
         }
 
         TarStats stats;
-        bool ok = tar_add_tree(*sink, src, entry.arc_name, topt, &stats);
+        bool ok = tar_add_tree(*sink, plan.src, plan.arc, topt, &stats);
         ok = tar_write_end(*sink) && ok;
         ok = sink->close() && ok;
 
-        entry.files = stats.files;
-        entry.bytes = stats.bytes;
-        total_files += stats.files;
-        total_bytes += stats.bytes;
         if (!ok) {
-            log_error("[%s] archive failed: %s", type.c_str(), dst.c_str());
+            unlink(tmp.c_str());
+            log_error("[%s] 归档失败: %s", type.c_str(), entry.archive.c_str());
             failed++;
-        } else {
-            log_info("[%s] %llu files, %s -> %s (%s)", type.c_str(), static_cast<unsigned long long>(stats.files),
-                     human_size(stats.bytes).c_str(), entry.archive.c_str(),
-                     human_size(file_size(dst)).c_str());
-            if (opt.databackup_format) write_md5_sidecar(dst);
+            entries.push_back(entry);
+            continue;
         }
+        if (rename(tmp.c_str(), dst.c_str()) != 0) {
+            log_error("[%s] rename 失败 %s: %s", type.c_str(), dst.c_str(), strerror(errno));
+            unlink(tmp.c_str());
+            failed++;
+            entries.push_back(entry);
+            continue;
+        }
+
+        entry.files = stats.files;
+        entry.bytes = file_size(dst);
+        total_files += stats.files;
+        total_bytes += entry.bytes;
+        log_info("[%s] %llu files, %s 源 -> %s（%s）", type.c_str(),
+                 static_cast<unsigned long long>(stats.files), human_size(stats.bytes).c_str(),
+                 entry.archive.c_str(), human_size(entry.bytes).c_str());
+
+        write_md5_sidecar(dst);
+        if (!src_hash.empty()) manifest_write(dst, src_hash, params);
         if (stats.skipped > 0) {
-            log_debug("[%s] skipped %llu entries", type.c_str(), static_cast<unsigned long long>(stats.skipped));
+            log_debug("[%s] skipped %llu entries", type.c_str(),
+                      static_cast<unsigned long long>(stats.skipped));
         }
-        meta.entries.push_back(entry);
+        entries.push_back(entry);
     }
 
-    if (opt.databackup_format) {
-        DbFormatInfo info;
-        info.pkg = opt.pkg;
-        info.user = opt.user;
-        info.uid = uid;
-        info.preserve_id = preserve_id;
-        info.compression_type = compression == Compression::Zstd ? "ZSTD" : "TAR";
-        fill_package_display_info(opt.pkg, opt.user, &info);
-        if (!write_databackup_config(dest, info, meta.entries, opt.out_dir)) failed++;
-        log_info("DataBackup 兼容目录已生成：%s", dest.c_str());
-    } else if (!write_meta_file(join_path(dest, "meta.json"), meta)) {
-        log_error("meta.json write failed");
-        failed++;
-    }
+    DbFormatInfo info;
+    info.pkg = opt.pkg;
+    info.user = opt.user;
+    info.uid = uid;
+    info.preserve_id = 0;
+    info.compression_type = ct_enum_name(opt.compression);
+    fill_package_display_info(opt.pkg, opt.user, &info);
+    if (!write_databackup_config(dest, info, entries, opt.out_dir)) failed++;
 
-    log_info("backup %s -> %s : %llu files, %s, uid=%d, %s", opt.pkg.c_str(), dest.c_str(),
+    std::string skip_note =
+        skipped_unchanged > 0 ? strfmt("（%d 类未变化跳过）", skipped_unchanged) : std::string();
+    log_info("backup %s -> %s : %llu files, %s, uid=%d, %s%s", opt.pkg.c_str(), dest.c_str(),
              static_cast<unsigned long long>(total_files), human_size(total_bytes).c_str(), uid,
-             compression_name(compression));
+             ct_enum_name(opt.compression), skip_note.c_str());
     return failed == 0 ? 0 : 1;
 }
 
