@@ -7,12 +7,9 @@ on:
   pull_request:
   workflow_dispatch:
 
-env:
-  ZSTD_VERSION: "1.5.6"
-
 jobs:
-  host-test:
-    name: host build + roundtrip test
+  host-check:
+    name: host compile check
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -20,16 +17,14 @@ jobs:
       - name: Install deps
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq cmake g++ zlib1g-dev libzstd-dev zstd
+          sudo apt-get install -y -qq cmake g++ zlib1g-dev
 
+      # 主机版只做编译检查：内嵌的是 aarch64 二进制，在 x86 上不可执行（运行时会回退系统 tar）
       - name: Configure
-        run: cmake -S . -B build-host -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build-host -DCMAKE_BUILD_TYPE=Release -DAPP_HOST_CHECK=ON
 
       - name: Build
         run: cmake --build build-host -j"$(nproc)"
-
-      - name: Roundtrip test
-        run: ./build-host/appbackup-test
 
       - name: CLI smoke
         run: |
@@ -49,6 +44,8 @@ jobs:
             api: 21
           - abi: x86_64
             api: 21
+          - abi: x86
+            api: 21
     steps:
       - uses: actions/checkout@v4
 
@@ -59,12 +56,14 @@ jobs:
           ndk-version: r27c
           add-to-path: false
 
-      - name: Fetch zstd source
+      - name: Check embedded tools
         run: |
-          curl -sSL -o "$RUNNER_TEMP/zstd.tar.gz" \
-            "https://github.com/facebook/zstd/releases/download/v${ZSTD_VERSION}/zstd-${ZSTD_VERSION}.tar.gz"
-          tar xzf "$RUNNER_TEMP/zstd.tar.gz" -C "$RUNNER_TEMP"
-          echo "ZSTD_SRC=$RUNNER_TEMP/zstd-${ZSTD_VERSION}" >> "$GITHUB_ENV"
+          set -e
+          for t in tar zstd; do
+            f="prebuilt/${{ matrix.abi }}/$t"
+            test -f "$f" || { echo "缺少 $f"; exit 1; }
+            echo "$f: $(file -b "$f")"
+          done
 
       - name: Configure
         env:
@@ -75,9 +74,7 @@ jobs:
             -DANDROID_ABI=${{ matrix.abi }} \
             -DANDROID_PLATFORM=android-${{ matrix.api }} \
             -DANDROID_STL=c++_static \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DAPP_BUILD_TESTS=OFF \
-            -DAPP_ZSTD_SRC="$ZSTD_SRC"
+            -DCMAKE_BUILD_TYPE=Release
 
       - name: Build
         run: cmake --build "build-${{ matrix.abi }}" -j"$(nproc)"

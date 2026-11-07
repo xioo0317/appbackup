@@ -9,7 +9,7 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# 正式产物只有 Android 版：可执行文件内嵌 arm64 静态 tar + zstd（见下方 APP_EMBED_*）。
+# 正式产物只有 Android 版：可执行文件内嵌对应 ABI 的静态 tar + zstd（见下方 APP_EMBED_*）。
 # 非 Android 构建仅用于开发期编译检查，运行时因 ABI 不符会回退系统 tar。
 option(APP_HOST_CHECK "非 Android 主机上构建（仅编译检查）" OFF)
 if(NOT ANDROID AND NOT APP_HOST_CHECK)
@@ -22,27 +22,45 @@ endif()
 # 上游 DataBackup 把静态 GNU tar + zstd 放在 assets/bin.zip，运行时解压到私有 bin 目录
 # 并 PATH 前置（BaseUtil.EnvInitializer）。归档字节由 tar 实现决定，所以必须用同一份。
 # 这里做等价的事：把同样的二进制嵌进可执行文件，运行时释放到磁盘，免去额外部署。
-set(APP_EMBED_ABI "arm64-v8a" CACHE STRING "prebuilt/<abi>/ 下的 tar/zstd 目标 ABI")
+#
+# 嵌入方式用汇编制导的 `.incbin`，不用 `ld -r -b binary`：NDK 的 ld 是 ld.lld，
+# 不支持 bfd 的 -b/--format 选项（报 target emulation unknown），而 .incbin 由
+# clang 内置汇编器直接支持，四个 ABI 通用，也不依赖 binutils。
+if(ANDROID)
+    set(_app_default_abi "${ANDROID_ABI}")
+else()
+    set(_app_default_abi "arm64-v8a")
+endif()
+set(APP_EMBED_ABI "${_app_default_abi}" CACHE STRING "prebuilt/<abi>/ 下的 tar/zstd 目标 ABI")
 set(APP_EMBED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/prebuilt/${APP_EMBED_ABI}")
 if(NOT EXISTS "${APP_EMBED_DIR}/tar" OR NOT EXISTS "${APP_EMBED_DIR}/zstd")
-    message(FATAL_ERROR "缺少内嵌二进制：${APP_EMBED_DIR}/{tar,zstd}（从上游 assets/bin.zip 提取）")
+    message(FATAL_ERROR
+        "缺少内嵌二进制：${APP_EMBED_DIR}/{tar,zstd}\n"
+        "请从上游 assets/bin.zip（source/app/src/<abi>/assets/）提取 tar 与 zstd 放入该目录。")
 endif()
 
+enable_language(ASM)
 set(APP_EMBED_OBJ_DIR "${CMAKE_BINARY_DIR}/gen")
 file(MAKE_DIRECTORY "${APP_EMBED_OBJ_DIR}")
-set(APP_EMBED_OBJS "")
+set(APP_EMBED_SRCS "")
 foreach(tool tar zstd)
-    set(obj "${APP_EMBED_OBJ_DIR}/${tool}.o")
-    add_custom_command(
-        OUTPUT "${obj}"
-        COMMAND ${CMAKE_LINKER} -r -b binary -o "${obj}" "${tool}"
-        WORKING_DIRECTORY "${APP_EMBED_DIR}"
-        DEPENDS "${APP_EMBED_DIR}/${tool}"
-        COMMENT "Embedding ${tool} (${APP_EMBED_ABI})"
-        VERBATIM)
-    list(APPEND APP_EMBED_OBJS "${obj}")
+    set(blob "${APP_EMBED_DIR}/${tool}")
+    set(asm "${APP_EMBED_OBJ_DIR}/embed_${tool}.S")
+    # %progbits：32 位 ARM 汇编器只认 '%' 形式，其余架构也接受
+    file(WRITE "${asm}"
+        "    .section .rodata.appbackup_${tool},\"a\",%progbits\n"
+        "    .p2align 4\n"
+        "    .globl appbackup_${tool}_begin\n"
+        "    .hidden appbackup_${tool}_begin\n"
+        "appbackup_${tool}_begin:\n"
+        "    .incbin \"${blob}\"\n"
+        "    .globl appbackup_${tool}_end\n"
+        "    .hidden appbackup_${tool}_end\n"
+        "appbackup_${tool}_end:\n"
+        "    .section .note.GNU-stack,\"\",%progbits\n")
+    set_property(SOURCE "${asm}" APPEND PROPERTY OBJECT_DEPENDS "${blob}")
+    list(APPEND APP_EMBED_SRCS "${asm}")
 endforeach()
-add_custom_target(appbackup_embed DEPENDS ${APP_EMBED_OBJS})
 
 set(APP_SOURCES
     src/main.cpp
@@ -64,12 +82,11 @@ set(APP_SOURCES
     src/restore.cpp
 )
 
-add_executable(appbackup ${APP_SOURCES} ${APP_EMBED_OBJS})
-add_dependencies(appbackup appbackup_embed)
+add_executable(appbackup ${APP_SOURCES} ${APP_EMBED_SRCS})
 
 target_compile_options(appbackup PRIVATE -Wall -Wextra -O2)
 target_include_directories(appbackup PRIVATE src)
-# ld -r -b binary 生成的 .o 没有 .note.GNU-stack，显式声明不可执行栈
+# 显式声明不可执行栈（.note.GNU-stack 已由嵌入用的 .S 提供，这里再加一层保险）
 target_link_options(appbackup PRIVATE -Wl,-z,noexecstack)
 
 find_library(ZLIB_LIB z)

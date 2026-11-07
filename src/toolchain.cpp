@@ -15,13 +15,13 @@
 #include "fsops.h"
 #include "proc.h"
 
-// CMake 用 `ld -r -b binary` 把 prebuilt/<abi>/{tar,zstd} 嵌进可执行文件，
-// 生成的符号固定为 _binary_<file>_start / _binary_<file>_end。
+// CMake 生成 embed_<tool>.S，用汇编 `.incbin` 把 prebuilt/<abi>/{tar,zstd} 原样嵌进
+// .rodata，符号为 appbackup_<tool>_begin / appbackup_<tool>_end。
 extern "C" {
-extern const unsigned char _binary_tar_start[];
-extern const unsigned char _binary_tar_end[];
-extern const unsigned char _binary_zstd_start[];
-extern const unsigned char _binary_zstd_end[];
+extern const unsigned char appbackup_tar_begin[];
+extern const unsigned char appbackup_tar_end[];
+extern const unsigned char appbackup_zstd_begin[];
+extern const unsigned char appbackup_zstd_end[];
 }
 
 namespace appbackup {
@@ -188,7 +188,7 @@ bool g_zstd_done = false;
 std::string resolve_tar() {
     if (g_tar_done) return g_tar;
     g_tar_done = true;
-    g_tar = ensure_tool("tar", _binary_tar_start, _binary_tar_end);
+    g_tar = ensure_tool("tar", appbackup_tar_begin, appbackup_tar_end);
     if (g_tar.empty()) {
         log_warn("[toolchain] 内嵌 tar 释放失败，回退系统 tar（GNU 专有选项会自动降级）");
         g_tar = "tar";  // 交给 execvp 走 PATH
@@ -199,7 +199,7 @@ std::string resolve_tar() {
 std::string resolve_zstd() {
     if (g_zstd_done) return g_zstd;
     g_zstd_done = true;
-    g_zstd = ensure_tool("zstd", _binary_zstd_start, _binary_zstd_end);
+    g_zstd = ensure_tool("zstd", appbackup_zstd_begin, appbackup_zstd_end);
     if (g_zstd.empty()) {
         log_warn("[toolchain] 内嵌 zstd 释放失败，回退系统 zstd");
         g_zstd = "zstd";
