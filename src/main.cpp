@@ -52,7 +52,8 @@ void print_usage() {
         "  --user <n>          用户 id，默认沿用 meta.json\n"
         "  --types <list>      只恢复指定类型\n"
         "  --clean             干净恢复：先清空目标第一层（保留 lib/cache/code_cache/no_backup/.ota）\n"
-        "  --install-apk       先安装备份里的 APK（多 APK 自动走 install-create 会话），再恢复数据\n"
+        "  --install-apk       覆盖安装：即使已安装也从备份重新安装（默认仅在未安装时自动装）\n"
+        "  --no-apk            不安装 APK（应用已卸载时将无法恢复数据）\n"
         "  --no-selinux        跳过 SELinux 重打标签\n"
         "  --no-verify         跳过属主校验\n"
         "  --no-checksum       跳过恢复前的 <归档>.md5 校验\n"
@@ -170,7 +171,13 @@ int main(int argc, char** argv) {
         } else if (a == "--clean") {
             ropt.clean = true;
         } else if (a == "--install-apk") {
+            // 兼容旧参数：强制覆盖安装（默认仅在应用未安装时自动安装）
             ropt.install_apk = true;
+            ropt.force_reinstall = true;
+        } else if (a == "--no-apk") {
+            // 不安装 APK（应用已卸载时会失败，与上游只恢复数据时的行为一致）
+            ropt.install_apk = false;
+            ropt.force_reinstall = false;
         } else if (a == "--no-selinux") {
             ropt.do_selinux = false;
         } else if (a == "--no-verify") {

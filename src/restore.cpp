@@ -435,11 +435,58 @@ int run_restore(const RestoreOptions& opt) {
     // 再装 APK（installd 会按本机 uid 创建数据目录并打好 SELinux 标签），最后写数据。
     if (opt.force_stop) run_shell("am force-stop --user " + std::to_string(user) + " " + pkg);
 
-    if (opt.install_apk) install_apk_from(in_dir, meta, user);
+    // 上游 AbstractRestoreService.onProcessing 的固定顺序：
+    //   PACKAGE_APK → USER → USER_DE → DATA → OBB → MEDIA，其中 restoreData 要求 uid != -1。
+    // 也就是说：应用被卸载后，上游能恢复靠的是「先装 APK，装完 uid 自然可解析」。
+    // 这里改成同样的语义：未安装就从备份里的 apk 归档自动安装，装不上才报错。
+    int uid = uid_for_package(pkg, user, 1, 0);
+    bool installed = uid > 0;
 
-    int uid = uid_for_package(pkg, user, 20, 500);
+    bool apk_available = false;
+    std::string apk_archive;
+    for (const auto& e : meta.entries) {
+        if (e.type != kDataTypeApk || !e.exists || e.archive.empty()) continue;
+        std::string p = join_path(in_dir, e.archive);
+        if (path_exists(p)) {
+            apk_available = true;
+            apk_archive = p;
+            break;
+        }
+    }
+
+    const bool need_install = opt.install_apk && (!installed || opt.force_reinstall);
+    if (need_install) {
+        if (!installed) {
+            log_info("应用 %s 未安装（user %d），先从备份安装 APK（与 DataBackup 行为一致）", pkg.c_str(), user);
+        } else if (opt.force_reinstall) {
+            log_info("按 --install-apk 覆盖安装 %s", pkg.c_str());
+        }
+        if (!apk_available) {
+            log_warn("备份里没有可用的 apk 归档，跳过安装步骤");
+        } else if (!install_apk_from(in_dir, meta, user)) {
+            log_error("APK 安装失败: %s", apk_archive.c_str());
+        } else {
+            // 安装后 uid 可能延迟可见，重新解析
+            uid = uid_for_package(pkg, user, 20, 500);
+            installed = uid > 0;
+        }
+    }
+
+    if (uid < 0) uid = uid_for_package(pkg, user, 20, 500);
     if (uid < 0) {
-        log_error("cannot resolve uid for %s on this device; is the app installed for user %d?", pkg.c_str(), user);
+        if (!installed) {
+            if (!apk_available) {
+                log_error("%s 未安装，且备份中没有 apk 归档；请先在设备上安装该应用（或补齐 apk 备份）后重试",
+                          pkg.c_str());
+            } else if (!opt.install_apk) {
+                log_error("%s 未安装，且已用 --no-apk 禁用安装；去掉该参数即可从备份自动安装后恢复",
+                          pkg.c_str());
+            } else {
+                log_error("%s 未安装，从备份安装 APK 后仍无法获取 uid（安装被系统拒绝？）", pkg.c_str());
+            }
+        } else {
+            log_error("cannot resolve uid for %s on this device; is the app installed for user %d?", pkg.c_str(), user);
+        }
         return 1;
     }
     log_info("target uid=%d", uid);
