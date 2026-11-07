@@ -72,8 +72,25 @@ APK 那一路是 `tar -C <apk 父目录> -cpf - ./*.apk`，所以 **apk.tar 的�
 `sanitizedLabel = label.replace(Regex("[^\\u4e00-\\u9fa5A-Za-z0-9_]"), "").trim('_')`
 （只保留中文/英文/数字/下划线，空格和斜杠直接删除）。取不到应用名、或显式 `--label plain` 时
 退回纯包名目录（legacy 格式）；`list` / `restore` 对两种目录都能识别。
-CLI 取 label 依次尝试 `/data/system/packages.xml` 的 `label=` 属性、`aapt dump badging <base.apk>`
-的 `application-label:`，都没有时可用 `--label <应用名>` 显式指定。
+
+**应用名怎么取**（只用 C++ / sh 指令，不解析任何 XML）：上游 App 用的是
+`ApplicationInfo.loadLabel(pm)`，而 Android 的 `dumpsys` / `pm` 只给 `labelRes`（资源 ID）
+或 `nonLocalizedLabel=null`，shell 里没有能直接返回资源型应用名的命令。真正同源的是 APK
+资源表里的 application label，由 `aapt` 读出来。因此 CLI 依次尝试：
+
+1. `pm path <pkg>` 取 APK 路径（`base.apk` 优先）；
+2. 定位 `aapt` / `aapt2`：环境变量 `APPBACKUP_AAPT` 显式指定，否则找 PATH、
+   `/data/adb/ksu/bin`、`/data/adb/magisk`、`/data/adb/modules/*/system/bin`、
+   `/system/bin` 等 root 常见工具目录（KernelSU/Magisk 的 aapt 模块可直接被引用）；
+3. `aapt dump badging <apk>`，按设备 `getprop persist.sys.locale` 优先取
+   `application-label-zh-CN:` 等本地化变体，再退回 `application-label:`，与上游 `loadLabel()` 一致；
+4. 兜底用系统接口 `cmd package dump` / `dumpsys package` 的 `nonLocalizedLabel=`
+   （仅当应用把 label 写成字面字符串时才有值）；
+5. 全拿不到时打印 `warn: no app name, fallback apps/<pkg>; --label <label>`，
+   可用 `--label <应用名>` 显式指定。
+
+日志统一为英文短格式（`info: [user] 11.7M raw -> user.tar.zst tarball 8.4M`、
+`info: [obb] skip`、`warn: ...`），不含中文。
 
 ### 4. 排除项（`PackagesBackupUtil.buildExclusionAndPrune`）
 

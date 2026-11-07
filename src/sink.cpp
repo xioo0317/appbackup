@@ -185,7 +185,7 @@ std::unique_ptr<Sink> open_sink(const std::string& path, Compression c, int leve
             // zstd 已改为调用系统 zstd 二进制（sysarchive），不再内置实现
             (void)path;
             (void)level;
-            log_error("zstd 归档由系统 zstd 二进制处理（sysarchive），不支持内置写入");
+            log_error("zstd archives are handled by the system zstd binary (sysarchive), built-in writer unsupported");
             return nullptr;
         default: return open_plain_sink(path);
     }
@@ -196,7 +196,7 @@ std::unique_ptr<Source> open_source_auto(const std::string& path) {
         case Compression::Gzip: return open_gzip_source(path);
         case Compression::Zstd:
             // zstd 归档改由系统 zstd 解压（sysarchive），不支持内置读取
-            log_error("zstd 归档由系统 zstd 二进制处理（sysarchive），不支持内置读取");
+            log_error("zstd archives are handled by the system zstd binary (sysarchive), built-in reader unsupported");
             return nullptr;
         default: return open_plain_source(path);
     }

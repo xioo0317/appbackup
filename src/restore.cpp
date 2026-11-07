@@ -229,7 +229,7 @@ bool install_apk_archive(const std::string& archive, int user) {
     ropt.src = archive;
     ropt.dstDir = tmp;
     if (!sys_restore(ropt)) {
-        log_error("无法解开 APK 归档: %s", archive.c_str());
+        log_error("cannot extract APK archive: %s", archive.c_str());
         run_shell("rm -rf '" + tmp + "'");
         return false;
     }
@@ -237,7 +237,7 @@ bool install_apk_archive(const std::string& archive, int user) {
     std::vector<std::string> apks;
     collect_apks(tmp, &apks);
     if (apks.empty()) {
-        log_error("%s 里没有找到 .apk 文件", archive.c_str());
+        log_error("no .apk found in %s", archive.c_str());
         run_shell("rm -rf '" + tmp + "'");
         return false;
     }
@@ -249,9 +249,9 @@ bool install_apk_archive(const std::string& archive, int user) {
         }
     }
 
-    log_info("安装 %zu 个 apk：%s", apks.size(), archive.c_str());
+    log_info("installing %zu apk(s): %s", apks.size(), archive.c_str());
     bool ok = apks.size() == 1 ? install_single_apk(apks[0], user) : install_split_apks(apks, user);
-    if (!ok) log_error("安装失败: %s", archive.c_str());
+    if (!ok) log_error("install failed: %s", archive.c_str());
     run_shell("rm -rf '" + tmp + "'");
     if (ok) usleep(500 * 1000);
     return ok;
@@ -263,10 +263,10 @@ bool install_apk_archive(const std::string& archive, int user) {
 //   3) op != OP_NONE 且 mode 已知时 appops set --uid <pkg> <op> <mode>（setOpsMode）
 void restore_permissions(const std::string& pkg, int user, const std::vector<PermEntry>& perms) {
     if (perms.empty()) {
-        log_info("permissions: 备份里没有记录，跳过");
+        log_info("permissions: no records in backup, skip");
         return;
     }
-    log_info("恢复权限：%zu 项", perms.size());
+    log_info("restoring permissions: %zu items", perms.size());
     run_shell("appops reset --user " + std::to_string(user) + " '" + pkg + "' 2>/dev/null");
 
     int granted_n = 0, revoked_n = 0, ops_n = 0;
@@ -289,7 +289,7 @@ void restore_permissions(const std::string& pkg, int user, const std::vector<Per
             ops_n++;
         }
     }
-    log_info("权限：grant %d / revoke %d / appop %d", granted_n, revoked_n, ops_n);
+    log_info("permissions: grant %d / revoke %d / appop %d", granted_n, revoked_n, ops_n);
 }
 
 // SSAID：上游通过 SettingsState（settings provider 内部 API）即时生效；
@@ -297,13 +297,13 @@ void restore_permissions(const std::string& pkg, int user, const std::vector<Per
 // provider 缓存不会立刻刷新 —— 通常需要重启（或 provider 被重启）才完全生效。
 void restore_ssaid(const std::string& pkg, int user, int uid, const std::string& value) {
     if (value.empty()) {
-        log_info("ssaid: 备份里为空，跳过");
+        log_info("ssaid: empty in backup, skip");
         return;
     }
     if (write_ssaid_value(user, uid, pkg, value)) {
-        log_info("ssaid: 已写入 settings_ssaid.xml（%s），重启后完全生效", value.c_str());
+        log_info("ssaid: written to settings_ssaid.xml (%s), fully effective after reboot", value.c_str());
     } else {
-        log_warn("ssaid: 写入失败（%s）", value.c_str());
+        log_warn("ssaid: write failed (%s)", value.c_str());
     }
 }
 
@@ -315,13 +315,13 @@ bool load_backup(const std::string& in_dir, BackupMeta* meta) {
     }
 
     if (!is_databackup_dir(in_dir)) {
-        log_error("%s 里既没有 meta.json，也不是 DataBackup 备份目录", in_dir.c_str());
+        log_error("%s has neither meta.json nor a DataBackup layout", in_dir.c_str());
         return false;
     }
 
     DbFormatInfo info;
     if (!read_databackup_info(in_dir, &info)) {
-        log_error("无法解析 DataBackup 备份目录: %s", in_dir.c_str());
+        log_error("cannot parse DataBackup dir: %s", in_dir.c_str());
         return false;
     }
 
@@ -338,7 +338,7 @@ bool load_backup(const std::string& in_dir, BackupMeta* meta) {
     meta->ssaid = info.ssaid;
     meta->permission_selected = info.permission_selected;
     meta->ssaid_selected = info.ssaid_selected;
-    log_info("识别为 DataBackup 备份：pkg=%s user=%d preserveId=%lld ct=%s", info.pkg.c_str(), info.user,
+    log_info("DataBackup layout: pkg=%s user=%d preserveId=%lld ct=%s", info.pkg.c_str(), info.user,
              info.preserve_id, info.compression_type.c_str());
 
     for (const auto& type : all_data_types()) {
@@ -397,7 +397,7 @@ std::string resolve_backup_dir(const std::string& in, const std::string& pkg_hin
                     if (std::find(pkgs.begin(), pkgs.end(), c.pkg) == pkgs.end()) pkgs.push_back(c.pkg);
                 }
                 if (pkgs.size() > 1) {
-                    log_error("%s 下有 %zu 个应用备份，请用 --pkg 指定：", in.c_str(), pkgs.size());
+                    log_error("%s has %zu app backups, use --pkg to select:", in.c_str(), pkgs.size());
                     for (const auto& p : pkgs) log_error("  %s", p.c_str());
                     return std::string();
                 }
@@ -406,7 +406,7 @@ std::string resolve_backup_dir(const std::string& in, const std::string& pkg_hin
             for (const auto& c : own) {
                 if (c.mtime > best->mtime) best = &c;
             }
-            log_info("自动定位备份目录: %s", best->path.c_str());
+            log_info("auto-located backup dir: %s", best->path.c_str());
             return best->path;
         }
     }
@@ -468,7 +468,7 @@ std::string resolve_backup_dir(const std::string& in, const std::string& pkg_hin
             if (std::find(pkgs.begin(), pkgs.end(), c.pkg) == pkgs.end()) pkgs.push_back(c.pkg);
         }
         if (pkgs.size() > 1) {
-            log_error("%s 下有 %zu 个应用备份，请用 --pkg 指定：", in.c_str(), pkgs.size());
+            log_error("%s has %zu app backups, use --pkg to select:", in.c_str(), pkgs.size());
             for (const auto& p : pkgs) log_error("  %s", p.c_str());
             return std::string();
         }
@@ -478,7 +478,7 @@ std::string resolve_backup_dir(const std::string& in, const std::string& pkg_hin
     for (const auto& c : cands) {
         if (c.preserve != best->preserve ? c.preserve > best->preserve : c.mtime > best->mtime) best = &c;
     }
-    log_info("自动定位备份目录: %s", best->path.c_str());
+    log_info("auto-located backup dir: %s", best->path.c_str());
     return best->path;
 }
 
@@ -513,7 +513,7 @@ ChecksumResult verify_checksum(const std::string& archive) {
 
 int run_restore(const RestoreOptions& opt) {
     if (opt.in_dir.empty()) {
-        log_error("restore requires --in <备份目录>");
+        log_error("restore requires --in <backup dir>");
         return 2;
     }
 
@@ -554,14 +554,14 @@ int run_restore(const RestoreOptions& opt) {
     const bool need_install = opt.install_apk && (!installed || opt.force_reinstall);
     if (need_install) {
         if (!installed) {
-            log_info("应用 %s 未安装（user %d），先从备份安装 APK（与 DataBackup 行为一致）", pkg.c_str(), user);
+            log_info("app %s not installed (user %d), installing APK from backup first (DataBackup behavior)", pkg.c_str(), user);
         } else if (opt.force_reinstall) {
-            log_info("按 --install-apk 覆盖安装 %s", pkg.c_str());
+            log_info("--install-apk: reinstalling %s", pkg.c_str());
         }
         if (!apk_available) {
-            log_warn("备份里没有可用的 apk 归档，跳过安装步骤");
+            log_warn("no usable apk archive in backup, skipping install");
         } else if (!install_apk_archive(apk_archive, user)) {
-            log_error("APK 安装失败: %s", apk_archive.c_str());
+            log_error("APK install failed: %s", apk_archive.c_str());
         } else {
             // 安装后 uid 可能延迟可见，重新解析
             uid = uid_for_package(pkg, user, 20, 500);
@@ -573,14 +573,14 @@ int run_restore(const RestoreOptions& opt) {
     if (uid < 0) {
         if (!installed) {
             if (!apk_available) {
-                log_error("%s 未安装，且备份中没有 apk 归档；请先在设备上安装该应用（或补齐 apk 备份）后重试",
+                log_error("%s not installed and no apk archive in backup; install the app (or add apk backup) and retry",
                           pkg.c_str());
                 if (!apk_note.empty()) log_error("%s", apk_note.c_str());
             } else if (!opt.install_apk) {
-                log_error("%s 未安装，且已用 --no-apk 禁用安装；去掉该参数即可从备份自动安装后恢复",
+                log_error("%s not installed and --no-apk set; remove it to auto-install from backup",
                           pkg.c_str());
             } else {
-                log_error("%s 未安装，从备份安装 APK 后仍无法获取 uid（安装被系统拒绝？）", pkg.c_str());
+                log_error("%s not installed, still no uid after APK install (install rejected?)", pkg.c_str());
             }
         } else {
             log_error("cannot resolve uid for %s on this device; is the app installed for user %d?", pkg.c_str(), user);
@@ -620,13 +620,13 @@ int run_restore(const RestoreOptions& opt) {
             ChecksumResult cs = verify_checksum(archive);
             if (cs.mismatch) {
                 if (!opt.force_checksum) {
-                    log_error("[%s] 校验失败（MD5 不一致）: %s", e.type.c_str(), archive.c_str());
+                    log_error("[%s] checksum failed (MD5 mismatch): %s", e.type.c_str(), archive.c_str());
                     log_error("        expected=%s actual=%s", cs.expected.c_str(), cs.actual.c_str());
-                    log_error("        如确认要强制恢复，加 --force-checksum");
+                    log_error("        use --force-checksum to override");
                     failed++;
                     continue;
                 }
-                log_warn("[%s] MD5 不一致，按 --force-checksum 强制恢复", e.type.c_str());
+                log_warn("[%s] MD5 mismatch, forcing per --force-checksum", e.type.c_str());
             } else if (cs.present) {
                 log_debug("[%s] md5 ok", e.type.c_str());
             }
@@ -637,7 +637,7 @@ int run_restore(const RestoreOptions& opt) {
         std::string target_context = selinux_get_context(dest);
         bool existed = path_exists(dest);
         if (!existed) {
-            log_warn("[%s] 目标目录不存在（未装 APK？）：%s", e.type.c_str(), dest.c_str());
+            log_warn("[%s] target dir missing (APK not installed?): %s", e.type.c_str(), dest.c_str());
             make_dirs(dest, 0771);
             target_context.clear();
         }
@@ -670,7 +670,7 @@ int run_restore(const RestoreOptions& opt) {
             continue;
         }
         if (!path_exists(dest)) {
-            log_error("[%s] 归档内没有 %s/ 目录，解包结果不在预期位置", e.type.c_str(), pkg.c_str());
+            log_error("[%s] archive has no %s/ dir, extracted layout unexpected", e.type.c_str(), pkg.c_str());
             failed++;
             continue;
         }

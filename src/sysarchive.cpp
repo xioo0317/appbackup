@@ -111,7 +111,7 @@ bool sys_backup(const SysBackupOpt& o, uint64_t* uncompressed_bytes) {
     if (o.apk_mode) {
         std::vector<std::string> apks = list_top_level_apks(o.srcDir);
         if (apks.empty()) {
-            log_info("[apk] 目录内没有 .apk，跳过: %s", o.srcDir.c_str());
+            log_info("[apk] no .apk in dir, skip: %s", o.srcDir.c_str());
             if (o.skipped) *o.skipped = true;
             return true;
         }
@@ -121,7 +121,7 @@ bool sys_backup(const SysBackupOpt& o, uint64_t* uncompressed_bytes) {
             if (toolchain::tar_has_exclude()) {
                 for (const auto& e : o.excludes) tarcmd += " --exclude=" + sh_quote(e);
             } else {
-                log_warn("[tar] 当前 tar 不支持 --exclude，排除项被忽略（归档变大，内容仍完整）");
+                log_warn("[tar] tar lacks --exclude, exclusions ignored (archive larger, content intact)");
             }
         }
         if (o.follow_symlinks && toolchain::tar_has_follow_symlinks()) tarcmd += " -h";
@@ -167,24 +167,24 @@ bool sys_backup(const SysBackupOpt& o, uint64_t* uncompressed_bytes) {
     }
 
     if (tar_rc != 0) {
-        log_error("[tar] 打包失败 (tar code=%d): %s", tar_rc, trim(r.out).c_str());
+        log_error("[tar] pack failed (tar code=%d): %s", tar_rc, trim(r.out).c_str());
         unlink(part.c_str());
         return false;
     }
     if (r.code != 0) {
-        log_error("[tar] 压缩失败 (code=%d): %s", r.code, trim(r.out).c_str());
+        log_error("[tar] compress failed (code=%d): %s", r.code, trim(r.out).c_str());
         unlink(part.c_str());
         return false;
     }
     if (file_size(part) == 0) {
-        log_error("[tar] 未产出归档: %s", part.c_str());
+        log_error("[tar] no archive produced: %s", part.c_str());
         unlink(part.c_str());
         return false;
     }
     if (uncompressed_bytes) *uncompressed_bytes = parse_totals(r.out);
 
     if (rename(part.c_str(), o.dst.c_str()) != 0) {
-        log_error("[tar] rename 失败 %s: %s", o.dst.c_str(), strerror(errno));
+        log_error("[tar] rename failed %s: %s", o.dst.c_str(), strerror(errno));
         unlink(part.c_str());
         return false;
     }
@@ -194,7 +194,7 @@ bool sys_backup(const SysBackupOpt& o, uint64_t* uncompressed_bytes) {
 bool sys_restore(const SysRestoreOpt& o) {
     // 目标目录必须存在（tar -C 不自建）；上游恢复前同样先 mkdirs
     if (!path_exists(o.dstDir) && !make_dirs(o.dstDir, 0755)) {
-        log_error("[tar] 无法创建目标目录: %s (%s)", o.dstDir.c_str(), strerror(errno));
+        log_error("[tar] cannot create target dir: %s (%s)", o.dstDir.c_str(), strerror(errno));
         return false;
     }
 
@@ -204,14 +204,14 @@ bool sys_restore(const SysRestoreOpt& o) {
         if (toolchain::tar_has_exclude()) {
             for (const auto& e : o.excludes) tarcmd += " --exclude=" + sh_quote(e);
         } else {
-            log_warn("[tar] 当前 tar 不支持 --exclude，恢复时会保留 cache/lib 等目录");
+            log_warn("[tar] tar lacks --exclude, restore will keep cache/lib etc.");
         }
     }
     if (o.recursive_unlink) {
         if (toolchain::tar_has_recursive_unlink()) {
             tarcmd += " --recursive-unlink";
         } else {
-            log_warn("[tar] 当前 tar 不支持 --recursive-unlink，改为覆盖写入");
+            log_warn("[tar] tar lacks --recursive-unlink, falling back to overwrite");
         }
     }
 
@@ -227,7 +227,7 @@ bool sys_restore(const SysRestoreOpt& o) {
 
     ExecResult r = run_shell(cmd);
     if (r.code != 0) {
-        log_error("[tar] 解包失败 (code=%d): %s", r.code, trim(r.out).c_str());
+        log_error("[tar] extract failed (code=%d): %s", r.code, trim(r.out).c_str());
         return false;
     }
     return true;

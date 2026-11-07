@@ -29,63 +29,63 @@ namespace {
 
 void print_usage() {
     printf(
-        "%s %s —— 应用数据打包 / 恢复（Android, 需 root）\n"
+        "%s %s - Android app data backup / restore (root required)\n"
         "\n"
-        "用法:\n"
-        "  %s backup  --pkg <包名> [选项]\n"
-        "  %s restore --in <备份目录> [选项]\n"
-        "  %s list    --in <备份目录>\n"
-        "  %s info    --pkg <包名> [--user N]\n"
-        "  %s toolchain          打印实际使用的 tar / zstd 路径与选项支持（排障用）\n"
+        "Usage:\n"
+        "  %s backup  --pkg <pkg> [options]\n"
+        "  %s restore --in <backup dir> [options]\n"
+        "  %s list    --in <backup dir>\n"
+        "  %s info    --pkg <pkg> [--user N]\n"
+        "  %s toolchain          show tar / zstd paths and supported options\n"
         "\n"
-        "backup 选项:\n"
-        "  --pkg <name>        要打包的应用包名（必填）\n"
-        "  --user <n>          用户 id，默认 0\n"
-        "  --types <list>      逗号分隔，默认全部：user,user_de,data,obb,media,apk\n"
-        "  --out <dir>         备份根目录，默认当前目录；会在其下建 apps/<应用名>_<包名>/user_<uid>\n"
-        "  --compress <mode>   zstd（默认）/ none；DataBackup 不支持 gzip\n"
-        "  --level <n>         zstd 压缩等级 1-19，默认 1（与 DataBackup 默认一致）\n"
-        "  --threads <n>       .manifest 的 threads=，默认 2（与上游样本一致）\n"
-        "  --preserve          已有主备份时先归档为 user_<uid>@<时间戳>\n"
-        "  --no-incremental    不读 .manifest 指纹，强制全量重打\n"
-        "  --label <值>        应用目录前缀：auto（默认，取应用名）/ plain（纯包名）/ 自定义文本\n"
-        "  --kill <mode>       打包前停进程：none（默认）/ am / kill\n"
-        "  --no-permissions    config 里 permissionState 记 Disabled（备份与恢复共用此开关）\n"
-        "  --no-ssaid          config 里 ssaidState 记 Disabled（备份与恢复共用此开关）\n"
+        "backup options:\n"
+        "  --pkg <name>        package name to back up (required)\n"
+        "  --user <n>          user id, default 0\n"
+        "  --types <list>      comma separated, default all: user,user_de,data,obb,media,apk\n"
+        "  --out <dir>         backup root, default cwd; creates apps/<label>_<pkg>/user_<uid>\n"
+        "  --compress <mode>   zstd (default) / none; DataBackup does not support gzip\n"
+        "  --level <n>         zstd level 1-19, default 1 (DataBackup default)\n"
+        "  --threads <n>       .manifest threads=, default 2\n"
+        "  --preserve          archive existing main backup as user_<uid>@<timestamp>\n"
+        "  --no-incremental    ignore .manifest fingerprint, force full repack\n"
+        "  --label <value>     app dir prefix: auto (default, app name) / plain (pkg only) / custom\n"
+        "  --kill <mode>       stop app before packing: none (default) / am / kill\n"
+        "  --no-permissions    set permissionState=Disabled in config\n"
+        "  --no-ssaid          set ssaidState=Disabled in config\n"
         "\n"
-        "restore 选项:\n"
-        "  --in <dir>          备份目录：版本目录 / 应用目录 / 备份根目录均可，自动下探到最新版本\n"
-        "  --pkg <name>        覆盖 meta.json 里的包名（从根目录下探时用来选应用）\n"
-        "  --user <n>          用户 id，默认沿用 meta.json\n"
-        "  --types <list>      只恢复指定类型\n"
-        "  --clean             干净恢复：先清空目标第一层（保留 lib/cache/code_cache/no_backup/.ota）\n"
-        "  --install-apk       覆盖安装：即使已安装也从备份重新安装（默认仅在未安装时自动装）\n"
-        "  --no-apk            不安装 APK（应用已卸载时将无法恢复数据）\n"
-        "  --no-selinux        跳过 SELinux 重打标签\n"
-        "  --no-permissions    不恢复运行时权限/AppOps（默认恢复，与上游一致）\n"
-        "  --no-ssaid          不恢复 SSAID（默认恢复，写入后重启生效）\n"
-        "  --no-verify         跳过属主校验\n"
-        "  --no-checksum       跳过恢复前的 <归档>.md5 校验\n"
-        "  --force-checksum    MD5 不一致时仍强制恢复\n"
+        "restore options:\n"
+        "  --in <dir>          version dir / app dir / backup root (auto-descends to newest)\n"
+        "  --pkg <name>        override package name from meta.json\n"
+        "  --user <n>          user id, default from meta.json\n"
+        "  --types <list>      restore only these types\n"
+        "  --clean             wipe target first level (keeps lib/cache/code_cache/no_backup/.ota)\n"
+        "  --install-apk       reinstall APK even if already installed\n"
+        "  --no-apk            do not install APK (cannot restore data if app is uninstalled)\n"
+        "  --no-selinux        skip SELinux relabel\n"
+        "  --no-permissions    skip runtime permissions / AppOps restore\n"
+        "  --no-ssaid          skip SSAID restore\n"
+        "  --no-verify         skip ownership check\n"
+        "  --no-checksum       skip <archive>.md5 check before restore\n"
+        "  --force-checksum    continue even if MD5 mismatches\n"
         "\n"
-        "全局选项:\n"
-        "  -v, --verbose       输出调试日志\n"
-        "  -q, --quiet         只输出错误\n"
-        "  -h, --help          显示本帮助\n"
-        "  --version           显示版本\n"
+        "Global options:\n"
+        "  -v, --verbose       verbose logging\n"
+        "  -q, --quiet         errors only\n"
+        "  -h, --help          show this help\n"
+        "  --version           show version\n"
         "\n"
-        "数据目录:\n"
+        "Data dirs:\n"
         "  user     /data/user/<N>/<pkg>\n"
         "  user_de  /data/user_de/<N>/<pkg>\n"
         "  data     /data/media/<N>/Android/data/<pkg>\n"
         "  obb      /data/media/<N>/Android/obb/<pkg>\n"
         "  media    /data/media/<N>/Android/media/<pkg>\n"
-        "  apk      pm path 的父目录下所有 *.apk\n"
+        "  apk      all *.apk in the dir of pm path\n"
         "\n"
-        "示例:\n"
+        "Examples:\n"
         "  %s backup --pkg com.tencent.mm --out /sdcard/DataBackup --kill am\n"
         "  %s backup --pkg com.tencent.mm --out /sdcard/DataBackup --preserve --level 3\n"
-        "  %s restore --in /sdcard/DataBackup/apps/微信_com.tencent.mm/user_0 --install-apk --clean\n"
+        "  %s restore --in /sdcard/DataBackup/apps/WeChat_com.tencent.mm/user_0 --install-apk --clean\n"
         "  %s restore --in /sdcard/DataBackup --pkg com.tencent.mm --clean\n",
         kToolName, kToolVersion, kToolName, kToolName, kToolName, kToolName, kToolName, kToolName, kToolName,
         kToolName, kToolName);
@@ -126,7 +126,7 @@ int main(int argc, char** argv) {
         std::string a = argv[i];
         auto next = [&](const char* name) -> std::string {
             if (i + 1 >= argc) {
-                fprintf(stderr, "缺少 %s 的参数\n", name);
+                fprintf(stderr, "missing value for %s\n", name);
                 exit(2);
             }
             return argv[++i];
@@ -147,7 +147,7 @@ int main(int argc, char** argv) {
         } else if (a == "--compress") {
             Compression c;
             if (!parse_compression(next("--compress"), &c)) {
-                fprintf(stderr, "未知压缩方式（zstd / gzip / none）\n");
+                fprintf(stderr, "unknown compression mode (zstd / gzip / none)\n");
                 return 2;
             }
             bopt.compression = c;
@@ -170,7 +170,7 @@ int main(int argc, char** argv) {
             // 只有 DataBackup 一种输出格式，--format 仅作旧脚本兼容占位，忽略具体取值
             std::string f = next("--format");
             if (f != "databackup" && f != "db") {
-                log_warn("--format %s 已忽略：工具只产出 DataBackup 结构（apps/<应用名>_<包名>/user_<uid>/）", f.c_str());
+                log_warn("--format %s ignored: tool writes DataBackup layout only (apps/<label>_<pkg>/user_<uid>/)", f.c_str());
             }
         } else if (a == "--kill") {
             std::string m = next("--kill");
@@ -178,7 +178,7 @@ int main(int argc, char** argv) {
             else if (m == "am") bopt.kill = KillMode::Am;
             else if (m == "kill") bopt.kill = KillMode::Kill;
             else {
-                fprintf(stderr, "未知 --kill 模式: %s\n", m.c_str());
+                fprintf(stderr, "unknown --kill mode: %s\n", m.c_str());
                 return 2;
             }
         } else if (a == "--in") {
@@ -216,7 +216,7 @@ int main(int argc, char** argv) {
             print_usage();
             return 0;
         } else {
-            fprintf(stderr, "未知参数: %s\n", a.c_str());
+            fprintf(stderr, "unknown option: %s\n", a.c_str());
             return 2;
         }
     }
@@ -225,7 +225,7 @@ int main(int argc, char** argv) {
     if (cmd == "restore") return run_restore(ropt);
     if (cmd == "list") {
         if (list_dir.empty()) {
-            fprintf(stderr, "list 需要 --in <备份目录>\n");
+            fprintf(stderr, "list requires --in <backup dir>\n");
             return 2;
         }
         return run_list(list_dir, bopt.pkg);
@@ -237,13 +237,13 @@ int main(int argc, char** argv) {
     }
     if (cmd == "info") {
         if (bopt.pkg.empty()) {
-            fprintf(stderr, "info 需要 --pkg <包名>\n");
+            fprintf(stderr, "info requires --pkg <pkg>\n");
             return 2;
         }
         return run_info(bopt.pkg, bopt.user);
     }
 
-    fprintf(stderr, "未知子命令: %s\n", cmd.c_str());
+    fprintf(stderr, "unknown subcommand: %s\n", cmd.c_str());
     print_usage();
     return 2;
 }

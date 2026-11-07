@@ -10,7 +10,7 @@ int g_log_level = 1;
 void log_msg(const char* level, const char* fmt, va_list ap) {
     char buf[4096];
     vsnprintf(buf, sizeof(buf), fmt, ap);
-    fprintf(stderr, "[%s] %s\n", level, buf);
+    fprintf(stderr, "%s: %s\n", level, buf);
     fflush(stderr);
 }
 

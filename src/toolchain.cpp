@@ -174,7 +174,7 @@ std::string ensure_tool(const char* name, const unsigned char* begin, const unsi
             log_debug("[toolchain] released %s -> %s (%zu bytes)", name, p.c_str(), len);
             return p;
         }
-        log_warn("[toolchain] 释放后无法执行（noexec 挂载或 ABI 不符）: %s", p.c_str());
+        log_warn("[toolchain] released binary not executable (noexec mount / ABI mismatch): %s", p.c_str());
         unlink(p.c_str());
     }
     return std::string();
@@ -190,7 +190,7 @@ std::string resolve_tar() {
     g_tar_done = true;
     g_tar = ensure_tool("tar", appbackup_tar_begin, appbackup_tar_end);
     if (g_tar.empty()) {
-        log_warn("[toolchain] 内嵌 tar 释放失败，回退系统 tar（GNU 专有选项会自动降级）");
+        log_warn("[toolchain] embedded tar release failed, falling back to system tar (GNU-only options degrade)");
         g_tar = "tar";  // 交给 execvp 走 PATH
     }
     return g_tar;
@@ -201,7 +201,7 @@ std::string resolve_zstd() {
     g_zstd_done = true;
     g_zstd = ensure_tool("zstd", appbackup_zstd_begin, appbackup_zstd_end);
     if (g_zstd.empty()) {
-        log_warn("[toolchain] 内嵌 zstd 释放失败，回退系统 zstd");
+        log_warn("[toolchain] embedded zstd release failed, falling back to system zstd");
         g_zstd = "zstd";
     }
     return g_zstd;

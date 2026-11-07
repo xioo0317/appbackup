@@ -150,7 +150,7 @@ int run_backup(const BackupOptions& opt) {
         return 2;
     }
     if (opt.compression == Compression::Gzip) {
-        log_error("DataBackup 只认 tar / tar.zst，不支持 gzip；请用 --compress zstd 或 none");
+        log_error("DataBackup accepts tar / tar.zst only, gzip unsupported; use --compress zstd or none");
         return 2;
     }
 
@@ -188,7 +188,7 @@ int run_backup(const BackupOptions& opt) {
     } else if (opt.label == "auto") {
         dir_label = info.label;
         if (dir_label.empty()) {
-            log_warn("未取到应用名，目录退回 apps/<pkg>；可用 --label <应用名> 指定以对齐上游命名");
+            log_warn("no app name, fallback apps/<pkg>; --label <label>");
         }
     } else {
         dir_label = opt.label;
@@ -204,10 +204,10 @@ int run_backup(const BackupOptions& opt) {
             archived = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, pid, dir_label);
         }
         if (rename(dest.c_str(), archived.c_str()) != 0) {
-            log_error("无法归档旧主备份 %s: %s", dest.c_str(), strerror(errno));
+            log_error("cannot archive previous backup %s: %s", dest.c_str(), strerror(errno));
             return 1;
         }
-        log_info("旧主备份已归档为 %s", basename_of(archived).c_str());
+        log_info("previous backup archived as %s", basename_of(archived).c_str());
     }
     if (!make_dirs(dest, 0755)) {
         log_error("cannot create %s", dest.c_str());
@@ -236,10 +236,10 @@ int run_backup(const BackupOptions& opt) {
         if (!have_src) {
             if (type == kDataTypeUser) {
                 // 上游把 USER 缺失视为失败（应用没装好 / 数据目录没建），其余类型只算跳过
-                log_error("[user] 源不存在: %s", plan.src.c_str());
+                log_error("[user] src missing: %s", plan.src.c_str());
                 failed++;
             } else {
-                log_info("[%s] 跳过（源不存在）", type.c_str());
+                log_info("[%s] skip", type.c_str());
             }
             entry.exists = false;
             entries.push_back(entry);
@@ -282,7 +282,7 @@ int run_backup(const BackupOptions& opt) {
             total_bytes += entry.bytes;
             skipped_unchanged++;
             if (!path_exists(dst + ".md5")) write_md5_sidecar(dst);
-            log_info("[%s] 未变化，跳过重打（%s）", type.c_str(), entry.archive.c_str());
+            log_info("[%s] unchanged, skipped (%s)", type.c_str(), entry.archive.c_str());
             entries.push_back(entry);
             continue;
         }
@@ -314,7 +314,7 @@ int run_backup(const BackupOptions& opt) {
             continue;
         }
         if (!ok) {
-            log_error("[%s] 归档失败: %s", type.c_str(), entry.archive.c_str());
+            log_error("[%s] archive failed: %s", type.c_str(), entry.archive.c_str());
             entry.exists = false;
             entries.push_back(entry);
             failed++;
@@ -324,7 +324,7 @@ int run_backup(const BackupOptions& opt) {
         entry.bytes = file_size(dst);
         entry.raw_bytes = unc > 0 ? unc : entry.bytes;
         total_bytes += entry.bytes;
-        log_info("[%s] %s 原始 -> %s（压缩后 %s）", type.c_str(), human_size(unc).c_str(),
+        log_info("[%s] %s raw -> %s tarball %s", type.c_str(), human_size(unc).c_str(),
                  entry.archive.c_str(), human_size(entry.bytes).c_str());
 
         write_md5_sidecar(dst);
@@ -341,7 +341,7 @@ int run_backup(const BackupOptions& opt) {
         }
     }
     if (!any_exists) {
-        log_error("backup %s : 没有任何数据可备份（应用是否已卸载 / 源目录不存在？）", opt.pkg.c_str());
+        log_error("backup %s: nothing to back up (app uninstalled / src missing?)", opt.pkg.c_str());
         return 1;
     }
 
@@ -354,24 +354,24 @@ int run_backup(const BackupOptions& opt) {
         info.ssaid = read_ssaid_value(opt.user, uid);
         info.permission_selected = opt.backup_permissions && !info.permissions.empty();
         info.ssaid_selected = opt.backup_ssaid && !info.ssaid.empty();
-        log_info("permissions: %zu 项, ssaid: %s", info.permissions.size(),
-                 info.ssaid.empty() ? "(空)" : info.ssaid.c_str());
+        log_info("permissions: %zu items, ssaid: %s", info.permissions.size(),
+                 info.ssaid.empty() ? "(empty)" : info.ssaid.c_str());
     } else {
         info.permission_selected = false;
         info.ssaid_selected = false;
-        log_warn("uid 未知，跳过权限/SSAID 采集");
+        log_warn("uid unknown, skipping permissions/SSAID");
     }
     if (opt.backup_permissions && !info.permission_selected) {
-        log_warn("权限采集为空，permissionState 记为 Disabled（避免上游恢复时误清空权限）");
+        log_warn("no permissions collected, permissionState=Disabled (avoid wiping device perms on restore)");
     }
     if (opt.backup_ssaid && !info.ssaid_selected) {
-        log_warn("SSAID 采集为空，ssaidState 记为 Disabled");
+        log_warn("empty SSAID, ssaidState=Disabled");
     }
 
     if (!write_databackup_config(dest, info, entries, opt.out_dir)) failed++;
 
     std::string skip_note =
-        skipped_unchanged > 0 ? strfmt("（%d 类未变化跳过）", skipped_unchanged) : std::string();
+        skipped_unchanged > 0 ? strfmt(" (%d unchanged, skipped)", skipped_unchanged) : std::string();
     log_info("backup %s -> %s : %s, uid=%d, %s%s", opt.pkg.c_str(), dest.c_str(),
              human_size(total_bytes).c_str(), uid, ct_enum_name(opt.compression), skip_note.c_str());
     return failed == 0 ? 0 : 1;

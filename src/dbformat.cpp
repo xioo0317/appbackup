@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cstring>
 #include <fstream>
 #include <map>
 #include <sstream>
@@ -294,40 +295,96 @@ long long parse_pkg_time(const std::string& text, const char* key) {
     return 0;
 }
 
-// 应用名（label）：CLI 没有 PackageManager.getApplicationLabel，按可靠性依次尝试。
+// 应用名（label）：只通过 sh 指令 / 系统接口 / 可引用的二进制工具获取，不解析任何 XML。
+//
+// Android 的 dumpsys / pm 只给出 labelRes（资源 ID）或 nonLocalizedLabel=null，
+// 没有任何 shell 命令能直接返回资源型应用名。与上游
+// PackageManager.getApplicationLabel() / ApplicationInfo.loadLabel(pm) 真正同源的，
+// 是 APK 资源表里的 application label，由 aapt 读出来：
+//     application-label:'Naraka: Bladepoint'
+//     application-label-zh-CN:'永劫无间'
+// 这里按设备 locale 优先取本地化变体，与上游 loadLabel() 行为一致。
+// aapt 是可引用的二进制工具：可用 APPBACKUP_AAPT 显式指定，否则在 PATH 与
+// root 常见工具目录 / 模块目录里查找。
 std::string probe_app_label(const std::string& pkg) {
-    // 1) 部分 ROM 在 packages.xml 里直接存了 label
-    ExecResult p = run_shell("grep -m1 'name=\"" + pkg + "\"' /data/system/packages.xml 2>/dev/null");
-    if (p.code == 0) {
-        size_t lp = p.out.find("label=\"");
-        if (lp != std::string::npos) {
-            lp += strlen("label=\"");
-            size_t le = p.out.find('"', lp);
-            if (le != std::string::npos && le > lp) return p.out.substr(lp, le - lp);
-        }
+    // 1) pm path：系统指令取 APK 路径，base.apk 优先（split APK 时 label 在 base 里）
+    std::string apk;
+    ExecResult pm = run_shell("pm path " + sh_quote(pkg) + " 2>/dev/null");
+    for (const auto& line : split(pm.out, '\n')) {
+        std::string s = trim(line);
+        if (s.compare(0, 8, "package:") == 0) s = trim(s.substr(8));
+        if (s.empty()) continue;
+        bool is_base = s.size() >= 8 && s.compare(s.size() - 8, 8, "base.apk") == 0;
+        if (apk.empty() || is_base) apk = s;
     }
-    // 2) aapt dump badging：application-label:'xxx' / application-label-zh-CN:'xxx'
-    ExecResult which = run_shell("command -v aapt 2>/dev/null || command -v aapt2 2>/dev/null");
-    if (which.code == 0 && !trim(which.out).empty()) {
-        std::vector<std::string> lines = split(which.out, '\n');
-        std::string aapt = lines.empty() ? trim(which.out) : trim(lines[0]);
-        ExecResult pm = run_shell("pm path " + pkg + " 2>/dev/null | head -1");
-        std::string apk = trim(pm.out);
-        if (!apk.empty()) {
-            const std::string prefix = "package:";
-            if (apk.compare(0, prefix.size(), prefix) == 0) apk = apk.substr(prefix.size());
-            apk = trim(apk);
-            if (!apk.empty()) {
-                ExecResult b = run_shell(sh_quote(aapt) + " dump badging " + sh_quote(apk) +
-                                         " 2>/dev/null | grep -m1 '^application-label'");
-                std::string line = trim(b.out);
-                size_t q1 = line.find('\'');
-                if (q1 != std::string::npos) {
-                    size_t q2 = line.find('\'', q1 + 1);
-                    if (q2 != std::string::npos && q2 > q1 + 1) return line.substr(q1 + 1, q2 - q1 - 1);
-                }
+
+    // 2) 定位可引用的 aapt 二进制工具
+    std::string aapt;
+    const char* env_aapt = getenv("APPBACKUP_AAPT");
+    if (env_aapt && *env_aapt) {
+        aapt = env_aapt;
+    } else {
+        ExecResult f = run_shell(
+            "for p in aapt aapt2"
+            " /data/adb/ksu/bin/aapt /data/adb/ksu/bin/aapt2"
+            " /data/adb/magisk/aapt /data/adb/magisk/aapt2"
+            " /data/adb/ap/bin/aapt /data/adb/ap/bin/aapt2"
+            " /data/adb/modules/*/system/bin/aapt /data/adb/modules/*/system/bin/aapt2"
+            " /system/bin/aapt /system/bin/aapt2 /system/xbin/aapt"
+            " /vendor/bin/aapt /data/local/tmp/aapt; do"
+            " command -v \"$p\" >/dev/null 2>&1 && { command -v \"$p\"; break; };"
+            " [ -x \"$p\" ] && { echo \"$p\"; break; }; done");
+        std::vector<std::string> fl = split(f.out, '\n');
+        aapt = trim(fl.empty() ? f.out : fl[0]);
+    }
+
+    // 3) aapt dump badging：按设备 locale 优先取本地化 label
+    if (!aapt.empty() && !apk.empty()) {
+        ExecResult b = run_shell(sh_quote(aapt) + " dump badging " + sh_quote(apk) +
+                                 " 2>/dev/null | grep '^application-label'");
+        std::vector<std::string> lines = split(b.out, '\n');
+
+        // 设备 locale（zh-CN 等）；aapt 的 key 形如 application-label-zh-CN
+        ExecResult gp = run_shell(
+            "getprop persist.sys.locale 2>/dev/null; getprop ro.product.locale 2>/dev/null");
+        std::vector<std::string> keys;
+        for (const auto& l : split(gp.out, '\n')) {
+            std::string t = trim(l);
+            if (t.empty() || t == "null") continue;
+            keys.push_back("application-label-" + t + ":");
+            size_t dash = t.find('-');
+            if (dash != std::string::npos) keys.push_back("application-label-" + t.substr(0, dash) + ":");
+        }
+        keys.push_back("application-label:");
+
+        for (const auto& key : keys) {
+            for (const auto& line : lines) {
+                std::string s = trim(line);
+                if (s.compare(0, key.size(), key) != 0) continue;
+                size_t q1 = s.find('\'');
+                if (q1 == std::string::npos) continue;
+                size_t q2 = s.rfind('\'');
+                if (q2 == std::string::npos || q2 <= q1 + 1) continue;
+                std::string v = s.substr(q1 + 1, q2 - q1 - 1);
+                if (!v.empty()) return v;
             }
         }
+    }
+
+    // 4) 系统接口兜底：cmd package dump / dumpsys package 的 nonLocalizedLabel=
+    //    仅当应用把 label 写成字面字符串（非资源引用）时才有值
+    for (const char* cmd : {"cmd package dump ", "dumpsys package "}) {
+        ExecResult d = run_shell(std::string(cmd) + sh_quote(pkg) + " 2>/dev/null");
+        size_t p = d.out.find("nonLocalizedLabel=");
+        if (p == std::string::npos) continue;
+        p += strlen("nonLocalizedLabel=");
+        size_t e = p;
+        while (e < d.out.size() && d.out[e] != ' ' && d.out[e] != '\n' && d.out[e] != '\r' &&
+               d.out[e] != '\t') {
+            e++;
+        }
+        std::string v = trim(d.out.substr(p, e - p));
+        if (!v.empty() && v != "null") return v;
     }
     return std::string();
 }
@@ -597,7 +654,7 @@ bool write_ssaid_value(int user, int uid, const std::string& pkg, const std::str
     std::string path = ssaid_file(user);
     std::string text = read_file_head(path, 4 << 20);
     if (text.empty()) {
-        log_warn("SSAID: 读不到 %s，跳过", path.c_str());
+        log_warn("SSAID: cannot read %s, skip", path.c_str());
         return false;
     }
     std::string key = std::to_string(uid);
@@ -626,7 +683,7 @@ bool write_ssaid_value(int user, int uid, const std::string& pkg, const std::str
         // 没有该 uid 的条目：在 </settings> 前插入一条（id 取现有最大值 +1）
         size_t close = text.rfind("</settings>");
         if (close == std::string::npos) {
-            log_warn("SSAID: %s 结构不认识，跳过", path.c_str());
+            log_warn("SSAID: unrecognized %s layout, skip", path.c_str());
             return false;
         }
         long next_id = 0;
@@ -647,7 +704,7 @@ bool write_ssaid_value(int user, int uid, const std::string& pkg, const std::str
     {
         std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
         if (!f) {
-            log_warn("SSAID: 无法写 %s", tmp.c_str());
+            log_warn("SSAID: cannot write %s", tmp.c_str());
             return false;
         }
         f << text;
