@@ -26,14 +26,17 @@ struct DbFormatInfo {
     std::string label;
     std::string version_name;
     long long version_code = 0;
+    long long first_install_time = 0;   // epoch ms
+    long long last_update_time = 0;     // epoch ms
 };
 
 // 目录名（user_0 / user_0@1699999999999）或 package_restore_config.json 命中即认为是 DataBackup 备份目录
 bool is_databackup_dir(const std::string& dir);
 
-// 生成 <saveDir>/apps/<pkg>/user_<user>@<preserveId>
+// 生成备份版本目录：<saveDir>/apps/<pkg>/user_<user>@<preserveId>
+// label 非空时应用目录用 <label>_<pkg>（与上游 DataBackup 命名一致），否则退回 <pkg>。
 std::string databackup_version_dir(const std::string& save_dir, const std::string& pkg, int user,
-                                   long long preserve_id);
+                                   long long preserve_id, const std::string& label = std::string());
 
 // 读 package_restore_config.json；文件缺失时退化为从目录名推断
 bool read_databackup_info(const std::string& dir, DbFormatInfo* out);

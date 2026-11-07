@@ -73,10 +73,15 @@ bool is_databackup_dir(const std::string& dir) {
 }
 
 std::string databackup_version_dir(const std::string& save_dir, const std::string& pkg, int user,
-                                   long long preserve_id) {
+                                   long long preserve_id, const std::string& label) {
     std::string name = "user_" + std::to_string(user);
     if (preserve_id != 0) name += "@" + std::to_string(preserve_id);
-    return join_path(join_path(join_path(save_dir, "apps"), pkg), name);
+    // 应用目录：有 label 时与上游一致用 <label>_<pkg>，否则退回 <pkg>
+    std::string app_dir = pkg;
+    if (!label.empty()) {
+        app_dir = label + "_" + pkg;
+    }
+    return join_path(join_path(join_path(save_dir, "apps"), app_dir), name);
 }
 
 bool read_databackup_info(const std::string& dir, DbFormatInfo* out) {
@@ -133,34 +138,50 @@ std::string find_databackup_archive(const std::string& dir, const std::string& t
 }
 
 void fill_package_display_info(const std::string& pkg, int user, DbFormatInfo* info) {
-    ExecResult r = run_shell("dumpsys package " + pkg + " 2>/dev/null | head -80");
-    if (r.code != 0 || trim(r.out).empty()) {
-        r = run_shell("cmd package dump " + pkg + " 2>/dev/null | head -80");
-    }
-    for (const auto& raw : split(r.out, '\n')) {
-        std::string line = trim(raw);
-        auto grab = [&](const char* key) -> std::string {
-            size_t pos = line.find(key);
-            if (pos == std::string::npos) return std::string();
-            pos += strlen(key);
-            size_t end = pos;
-            while (end < line.size() && line[end] != ' ' && line[end] != '\t' && line[end] != '\r') end++;
-            return line.substr(pos, end - pos);
-        };
-        if (info->version_name.empty()) {
-            std::string v = grab("versionName=");
-            if (!v.empty()) info->version_name = v;
-        }
-        if (info->version_code == 0) {
-            std::string v = grab("versionCode=");
-            if (!v.empty()) info->version_code = atoll(v.c_str());
-        }
-        if (info->label.empty()) {
-            std::string v = grab("labelRes=");
-            (void)v;  // label 取不到就留空，DataBackup 允许空 label
-        }
-    }
     (void)user;
+    // dumpsys 里能直接拿到的数值/时间字段
+    ExecResult r = run_shell("dumpsys package " + pkg + " 2>/dev/null");
+    if (r.code != 0 || trim(r.out).empty()) {
+        r = run_shell("cmd package dump " + pkg + " 2>/dev/null");
+    }
+    auto grab_digits = [&](const char* key) -> long long {
+        size_t pos = r.out.find(key);
+        if (pos == std::string::npos) return 0;
+        pos += strlen(key);
+        size_t end = pos;
+        while (end < r.out.size() && isdigit(static_cast<unsigned char>(r.out[end]))) end++;
+        if (end == pos) return 0;
+        return atoll(r.out.substr(pos, end - pos).c_str());
+    };
+    auto grab_token = [&](const char* key) -> std::string {
+        size_t pos = r.out.find(key);
+        if (pos == std::string::npos) return std::string();
+        pos += strlen(key);
+        size_t end = pos;
+        while (end < r.out.size() && r.out[end] != ' ' && r.out[end] != '\t' && r.out[end] != '\r' &&
+               r.out[end] != '\n') {
+            end++;
+        }
+        return r.out.substr(pos, end - pos);
+    };
+    if (info->version_code == 0) info->version_code = grab_digits("versionCode=");
+    if (info->version_name.empty()) info->version_name = grab_token("versionName=");
+    if (info->first_install_time == 0) info->first_install_time = grab_digits("firstInstallTime=");
+    if (info->last_update_time == 0) info->last_update_time = grab_digits("lastUpdateTime=");
+
+    // label：dumpsys 给不到，从 /data/system/packages.xml 的 label="..." 尽力读取
+    if (info->label.empty()) {
+        ExecResult p = run_shell("grep -m1 'name=\"" + pkg + "\"' /data/system/packages.xml 2>/dev/null");
+        if (p.code == 0 && !trim(p.out).empty()) {
+            std::string line = p.out;
+            size_t lp = line.find("label=\"");
+            if (lp != std::string::npos) {
+                lp += strlen("label=\"");
+                size_t le = line.find('"', lp);
+                if (le != std::string::npos) info->label = line.substr(lp, le - lp);
+            }
+        }
+    }
 }
 
 bool write_md5_sidecar(const std::string& archive_path) {
@@ -209,8 +230,8 @@ bool write_databackup_config(const std::string& dir, const DbFormatInfo& info,
     os << "    \"versionName\": \"" << json_escape(info.version_name) << "\",\n";
     os << "    \"versionCode\": " << info.version_code << ",\n";
     os << "    \"flags\": 0,\n";
-    os << "    \"firstInstallTime\": 0,\n";
-    os << "    \"lastUpdateTime\": 0\n";
+    os << "    \"firstInstallTime\": " << info.first_install_time << ",\n";
+    os << "    \"lastUpdateTime\": " << info.last_update_time << "\n";
     os << "  },\n";
     os << "  \"extraInfo\": {\n";
     os << "    \"uid\": " << (info.uid > 0 ? info.uid : -1) << ",\n";
@@ -236,11 +257,11 @@ bool write_databackup_config(const std::string& dir, const DbFormatInfo& info,
     auto stats_block = [&](const char* indent) {
         std::ostringstream b;
         b << indent << "\"apkBytes\": " << bytes_of(kDataTypeApk) << ",\n";
-        b << indent << "\"userBytes\": " << bytes_of(kDataTypeUser) << ",\n";
-        b << indent << "\"userDeBytes\": " << bytes_of(kDataTypeUserDe) << ",\n";
         b << indent << "\"dataBytes\": " << bytes_of(kDataTypeData) << ",\n";
+        b << indent << "\"mediaBytes\": " << bytes_of(kDataTypeMedia) << ",\n";
         b << indent << "\"obbBytes\": " << bytes_of(kDataTypeObb) << ",\n";
-        b << indent << "\"mediaBytes\": " << bytes_of(kDataTypeMedia) << "\n";
+        b << indent << "\"userBytes\": " << bytes_of(kDataTypeUser) << ",\n";
+        b << indent << "\"userDeBytes\": " << bytes_of(kDataTypeUserDe) << "\n";
         return b.str();
     };
     os << "  \"storageStats\": {\n";

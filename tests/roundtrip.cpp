@@ -1,5 +1,4 @@
-// 主机侧自测：打包 / 解包往返 + 与系统 tar 互操作 + 路径穿越防护
-#include <dirent.h>
+// 主机侧自测：调用系统 tar/zstd 的打包/解包往返、排除项、APK 扁平、确定性、互操作
 #include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -10,8 +9,8 @@
 #include <string>
 
 #include "common.h"
-#include "fsops.h"
 #include "dbformat.h"
+#include "fsops.h"
 #include "fingerprint.h"
 #include "manifest.h"
 #include "md5.h"
@@ -19,8 +18,7 @@
 #include "proc.h"
 #include "restore_policy.h"
 #include "sink.h"
-#include "tar_reader.h"
-#include "tar_writer.h"
+#include "sysarchive.h"
 
 using namespace appbackup;
 
@@ -55,8 +53,7 @@ static void rm_rf(const std::string& path) { run_shell("rm -rf '" + path + "'");
 int main() {
     g_log_level = 1;
     std::string base = "/tmp/appbackup_rt_" + std::to_string(getpid());
-    std::string src = base + "/src";
-    std::string out = base + "/out";
+
     // 备份产物：清单指纹 / manifest 格式 / package_restore_config.json（对齐 DataBackup）
     {
         std::string bsrc = base + "/bsrc/com.demo.bk";
@@ -133,58 +130,43 @@ int main() {
 
     rm_rf(base);
 
-    make_dirs(src + "/com.demo.app/sub/deep", 0755);
-    write_text(src + "/com.demo.app/a.txt", "hello appbackup\n");
-    write_text(src + "/com.demo.app/sub/b.bin", std::string(5000, 'x'));
-    write_text(src + "/com.demo.app/empty.dat", "");
-    write_text(src + "/com.demo.app/cache/should_skip.txt", "cache");
-    write_text(src + "/com.demo.app/sub/deep/Backup_2024.db", "skip me");
-    // 超长路径（>100 字节）触发 pax path 扩展
-    std::string long_dir = src + "/com.demo.app/" + std::string(60, 'd') + "/" + std::string(60, 'e');
-    make_dirs(long_dir, 0755);
-    write_text(long_dir + "/" + std::string(90, 'f') + ".txt", "long path ok\n");
-    // 符号链接 + 硬链接
-    if (symlink("a.txt", (src + "/com.demo.app/link_to_a").c_str()) != 0) perror("symlink");
-    if (link((src + "/com.demo.app/a.txt").c_str(), (src + "/com.demo.app/hard_to_a").c_str()) != 0) perror("link");
-
-    TarOptions topt;
-    topt.exclude_prefixes.push_back("com.demo.app/cache");
-    topt.exclude_globs.push_back("Backup_*");
-
-    std::string tar_path = base + "/t.tar";
+    // ---- sys_backup / sys_restore 往返（调用系统 tar，与上游 TarUtil 指令一致）----
     {
-        std::unique_ptr<Sink> sink = open_plain_sink(tar_path);
-        check(sink != nullptr, "open plain sink");
-        TarStats st;
-        bool ok = tar_add_tree(*sink, src + "/com.demo.app", "com.demo.app", topt, &st);
-        ok = tar_write_end(*sink) && ok;
-        ok = sink->close() && ok;
-        check(ok, "tar_add_tree plain");
-        check(st.files == 4, "file count (a.txt/b.bin/empty.dat/long.txt)");
-        check(st.links == 2, "symlink + hardlink count");
-        printf("       files=%llu dirs=%llu links=%llu bytes=%llu\n",
-               static_cast<unsigned long long>(st.files), static_cast<unsigned long long>(st.dirs),
-               static_cast<unsigned long long>(st.links), static_cast<unsigned long long>(st.bytes));
-    }
+        std::string src = base + "/src/com.demo.app";
+        make_dirs(src + "/sub/deep", 0755);
+        write_text(src + "/a.txt", "hello appbackup\n");
+        write_text(src + "/sub/b.bin", std::string(5000, 'x'));
+        write_text(src + "/empty.dat", "");
+        write_text(src + "/cache/should_skip.txt", "cache");
+        write_text(src + "/Backup_2024.db", "skip me");
+        std::string long_dir = src + "/" + std::string(60, 'd') + "/" + std::string(60, 'e');
+        make_dirs(long_dir, 0755);
+        write_text(long_dir + "/" + std::string(90, 'f') + ".txt", "long path ok\n");
+        if (symlink("a.txt", (src + "/link_to_a").c_str()) != 0) perror("symlink");
+        if (link((src + "/a.txt").c_str(), (src + "/hard_to_a").c_str()) != 0) perror("link");
 
-    // 系统 tar 能读我们的产物
-    {
-        ExecResult r = run_shell("tar -tf '" + tar_path + "' >/dev/null 2>&1");
-        check(r.code == 0, "system tar can list our archive");
-        ExecResult r2 = run_shell("tar -tf '" + tar_path + "' | grep -c 'cache\\|Backup_'");
-        check(trim(r2.out) == "0", "exclusions honoured (no cache/Backup_ entries)");
-    }
+        std::string tar_path = base + "/t.tar";
+        SysBackupOpt bo;
+        bo.srcDir = base + "/src";
+        bo.src = "com.demo.app";
+        bo.dst = tar_path;
+        bo.compression = Compression::Plain;
+        bo.excludes = {"com.demo.app/cache", "Backup_*"};
+        uint64_t unc = 0;
+        check(sys_backup(bo, &unc) && path_exists(tar_path), "sys_backup plain (data)");
 
-    // 解包往返
-    {
-        ExtractOptions eopt;
-        eopt.dest_dir = out;
-        std::unique_ptr<Source> s = open_plain_source(tar_path);
-        check(s != nullptr, "open plain source");
-        ExtractStats est;
-        bool ok = tar_extract(*s, eopt, &est);
-        s->close();
-        check(ok, "tar_extract plain");
+        // 系统 tar 能读我们的产物
+        check(run_shell("tar -tf '" + tar_path + "' >/dev/null 2>&1").code == 0, "system tar can list our archive");
+        check(trim(run_shell("tar -tf '" + tar_path + "' | grep -c 'cache\\|Backup_'").out) == "0",
+              "exclusions honoured (no cache/Backup_ entries)");
+
+        // 解包往返
+        std::string out = base + "/out";
+        SysRestoreOpt ro;
+        ro.src = tar_path;
+        ro.dstDir = out;
+        ro.excludes = {"com.demo.app/cache", "Backup_*"};
+        check(sys_restore(ro), "sys_restore plain (data)");
         check(read_all(out + "/com.demo.app/a.txt") == "hello appbackup\n", "content roundtrip");
         check(read_all(out + "/com.demo.app/sub/b.bin").size() == 5000, "binary size roundtrip");
         check(read_all(out + "/com.demo.app/empty.dat").empty(), "empty file");
@@ -192,150 +174,98 @@ int main() {
                            std::string(90, 'f') + ".txt"),
               "long path (>255 bytes) roundtrip");
         struct stat st;
-        check(lstat((out + "/com.demo.app/link_to_a").c_str(), &st) == 0 && S_ISLNK(st.st_mode), "symlink restored");
-        check(lstat((out + "/com.demo.app/hard_to_a").c_str(), &st) == 0 && st.st_nlink == 2, "hardlink restored");
+        check(lstat((out + "/com.demo.app/link_to_a").c_str(), &st) == 0 && S_ISLNK(st.st_mode),
+              "symlink restored");
+        check(lstat((out + "/com.demo.app/hard_to_a").c_str(), &st) == 0 && st.st_nlink == 2,
+              "hardlink restored");
         check(!path_exists(out + "/com.demo.app/cache/should_skip.txt"), "excluded dir not extracted");
     }
 
-    // gzip 往返
+    // ---- APK 扁平打包：系统 tar 用 ./*.apk glob，天然不含 lib/oat 子目录 ----
     {
-        std::string gz = base + "/t.tar.gz";
-        std::unique_ptr<Sink> sink = open_gzip_sink(gz, 6);
-        TarStats st;
-        bool ok = tar_add_tree(*sink, src + "/com.demo.app", "com.demo.app", topt, &st);
-        ok = tar_write_end(*sink) && ok;
-        ok = sink->close() && ok;
-        check(ok, "gzip pack");
-        check(file_is_gzip(gz), "gzip magic detected");
+        std::string apksrc = base + "/apksrc";
+        make_dirs(apksrc + "/lib/arm64", 0755);
+        make_dirs(apksrc + "/oat/arm64", 0755);
+        write_text(apksrc + "/lib/arm64/libnative.so", "so");
+        write_text(apksrc + "/oat/arm64/base.odex", "odex");
+        write_text(apksrc + "/base.apk", "PK\x03\x04 base");
+        write_text(apksrc + "/split_config.arm64_v8a.apk", "PK\x03\x04 split");
+        write_text(apksrc + "/notapk.txt", "skip");
 
-        std::string out2 = base + "/out2";
-        ExtractOptions eopt;
-        eopt.dest_dir = out2;
-        std::unique_ptr<Source> s = open_gzip_source(gz);
-        ExtractStats est;
-        bool ok2 = s && tar_extract(*s, eopt, &est);
-        if (s) s->close();
-        check(ok2, "gzip unpack");
-        check(read_all(out2 + "/com.demo.app/a.txt") == "hello appbackup\n", "gzip content roundtrip");
+        std::string apkArc = base + "/apk.tar";
+        SysBackupOpt bo;
+        bo.apk_mode = true;
+        bo.srcDir = apksrc;
+        bo.src = "./*.apk";
+        bo.dst = apkArc;
+        bo.compression = Compression::Plain;
+        check(sys_backup(bo) && path_exists(apkArc), "apk pack (cd + ./*.apk glob)");
 
-        ExecResult r = run_shell("tar -tzf '" + gz + "' >/dev/null 2>&1");
-        check(r.code == 0, "system tar can read our .tar.gz");
+        std::string listing = run_shell("tar -tf '" + apkArc + "'").out;
+        check(listing.find("lib") == std::string::npos && listing.find("oat") == std::string::npos &&
+                  listing.find("notapk") == std::string::npos,
+              "apk archive contains only ./*.apk (no lib/oat/notapk)");
+        check(trim(run_shell("tar -tf '" + apkArc + "' | grep -c '\\.apk'").out) == "2",
+              "apk archive has exactly 2 top-level apks");
+
+        std::string apkout = base + "/apkout";
+        SysRestoreOpt ro;
+        ro.src = apkArc;
+        ro.dstDir = apkout;
+        check(sys_restore(ro) && path_exists(apkout + "/base.apk") &&
+                  path_exists(apkout + "/split_config.arm64_v8a.apk"),
+              "apk extracts to top-level");
+        check(!path_exists(apkout + "/notapk.txt"), "non-apk excluded from apk archive");
     }
 
-    // 路径穿越防护
+    // ---- 确定性：同目录打包两次，系统 tar 字节一致（同一设备 readdir 顺序稳定）----
     {
-        std::string evil = base + "/evil.tar";
-        // 手工构造一个 ../escape.txt 的头
-        std::string payload = "pwned\n";
-        char h[512];
-        memset(h, 0, sizeof(h));
-        memcpy(h, "../escape.txt", 13);
-        snprintf(h + 100, 8, "%07o", 0644);
-        snprintf(h + 108, 8, "%07o", 0);
-        snprintf(h + 116, 8, "%07o", 0);
-        snprintf(h + 124, 12, "%011o", static_cast<unsigned>(payload.size()));
-        snprintf(h + 136, 12, "%011o", 0);
-        memset(h + 148, ' ', 8);
-        h[156] = '0';
-        memcpy(h + 257, "ustar", 5);
-        memcpy(h + 263, "00", 2);
-        unsigned sum = 0;
-        for (size_t i = 0; i < 512; i++) sum += static_cast<unsigned char>(h[i]);
-        snprintf(h + 148, 8, "%06o", sum);
-        std::string blob(h, 512);
-        blob.append(payload);
-        blob.append(512 - payload.size(), '\0');
-        blob.append(1024, '\0');
-        write_text(evil, blob);
-
-        std::string out3 = base + "/out3";
-        ExtractOptions eopt;
-        eopt.dest_dir = out3;
-        std::unique_ptr<Source> s = open_plain_source(evil);
-        ExtractStats est;
-        bool ok = s && tar_extract(*s, eopt, &est);
-        if (s) s->close();
-        check(ok, "traversal archive handled without error");
-        check(!path_exists(base + "/escape.txt"), "path traversal blocked (no ../escape.txt)");
+        std::string detsrc = base + "/detsrc/com.demo.det";
+        make_dirs(detsrc + "/a", 0755);
+        write_text(detsrc + "/a/z.txt", "z");
+        write_text(detsrc + "/b.txt", "b");
+        auto pack = [&](const std::string& p) -> std::string {
+            SysBackupOpt bo;
+            bo.srcDir = base + "/detsrc";
+            bo.src = "com.demo.det";
+            bo.dst = p;
+            bo.compression = Compression::Plain;
+            sys_backup(bo);
+            return md5_of_file(p);
+        };
+        std::string m1 = pack(base + "/det1.tar");
+        std::string m2 = pack(base + "/det2.tar");
+        check(m1 == m2 && m1.size() == 32, "deterministic: same tree packs to identical tar bytes");
     }
 
-#if defined(APP_HAS_ZSTD)
-    // zstd 往返 + 与系统 zstd 互操作
+    // ---- DataBackup 兼容结构：package_restore_config.json + md5 + 目录命名 ----
     {
-        std::string zst = base + "/t.tar.zst";
-        std::unique_ptr<Sink> sink = open_sink(zst, Compression::Zstd, 6);
-        TarStats st;
-        bool ok = sink && tar_add_tree(*sink, src + "/com.demo.app", "com.demo.app", topt, &st);
-        ok = tar_write_end(*sink) && ok;
-        ok = sink->close() && ok;
-        check(ok, "zstd pack");
-        check(file_is_zstd(zst), "zstd magic detected");
-        check(detect_compression(zst) == Compression::Zstd, "detect_compression -> zstd");
-
-        std::string out4 = base + "/out4";
-        ExtractOptions eopt;
-        eopt.dest_dir = out4;
-        std::unique_ptr<Source> s = open_source_auto(zst);
-        ExtractStats est;
-        bool ok2 = s && tar_extract(*s, eopt, &est);
-        if (s) s->close();
-        check(ok2, "zstd unpack (auto detect)");
-        check(read_all(out4 + "/com.demo.app/a.txt") == "hello appbackup\n", "zstd content roundtrip");
-
-        ExecResult has = run_shell("command -v zstd >/dev/null 2>&1");
-        if (has.code == 0) {
-            ExecResult r = run_shell("zstd -d -c '" + zst + "' 2>/dev/null | tar -tf - >/dev/null 2>&1");
-            check(r.code == 0, "system zstd+tar can read our .tar.zst");
-        } else {
-            printf("[SKIP] system zstd+tar (host has no zstd CLI)\n");
-        }
-    }
-#endif
-
-    // DataBackup 兼容结构：flat apk 归档 + package_restore_config.json + md5
-    {        std::string apkSrc = base + "/apksrc";
-        make_dirs(apkSrc, 0755);
-        write_text(apkSrc + "/base.apk", "PK\x03\x04 fake apk");
-        write_text(apkSrc + "/split_config.arm64_v8a.apk", "PK\x03\x04 split");
-        write_text(apkSrc + "/notapk.txt", "skip");
-
         std::string dbdir = base + "/DataBackup/apps/com.demo.app/user_0@1767225600000";
         make_dirs(dbdir, 0755);
-        std::string apkArc = dbdir + "/apk.tar" + compression_suffix(Compression::Zstd);
-        {
-            TarOptions t2;
-            t2.only_top_level_files = true;
-            t2.file_suffix_filter = ".apk";
-            t2.flat_root = true;
-            std::unique_ptr<Sink> sink = open_sink(apkArc, Compression::Zstd, 6);
-            TarStats st;
-            bool ok = sink && tar_add_tree(*sink, apkSrc, "apk", t2, &st);
-            ok = tar_write_end(*sink) && ok;
-            ok = sink->close() && ok;
-            check(ok, "flat apk archive");
-            check(st.files == 2, "flat apk keeps 2 top-level apks");
-        }
-        {
-            ExtractOptions eopt;
-            eopt.dest_dir = base + "/apkout";
-            std::unique_ptr<Source> s = open_source_auto(apkArc);
-            ExtractStats est;
-            bool ok = s && tar_extract(*s, eopt, &est);
-            if (s) s->close();
-            check(ok && path_exists(base + "/apkout/base.apk"), "flat apk archive extracts to top level");
-            check(!path_exists(base + "/apkout/notapk.txt"), "non-apk excluded from flat archive");
-        }
+        // apk 归档用系统 tar 扁平打包
+        std::string apksrc = base + "/apksrc2";
+        make_dirs(apksrc, 0755);
+        write_text(apksrc + "/base.apk", "PK\x03\x04 fake apk");
+        write_text(apksrc + "/split_config.arm64_v8a.apk", "PK\x03\x04 split");
+        write_text(apksrc + "/notapk.txt", "skip");
+        std::string apkArc = dbdir + "/apk.tar" + compression_suffix(Compression::Plain);
+        SysBackupOpt bo;
+        bo.apk_mode = true;
+        bo.srcDir = apksrc;
+        bo.src = "./*.apk";
+        bo.dst = apkArc;
+        bo.compression = Compression::Plain;
+        check(sys_backup(bo), "flat apk archive (databackup layout)");
 
         check(write_md5_sidecar(apkArc), "md5 sidecar written");
         std::string md5txt = trim(read_all(apkArc + ".md5"));
         check(md5txt == md5_of_file(apkArc) && md5txt.size() == 32, "md5 sidecar content matches");
-        check(md5txt == "d41d8cd98f00b204e9800998ecf8427e" || md5txt != "", "md5 hex format");
 
         std::vector<DataEntry> entries;
         DataEntry e;
         e.type = kDataTypeApk;
         e.exists = true;
-        e.bytes = 1234;
+        e.bytes = static_cast<uint64_t>(file_size(apkArc));
         entries.push_back(e);
         DbFormatInfo info;
         info.pkg = "com.demo.app";
@@ -343,7 +273,8 @@ int main() {
         info.uid = 10234;
         info.preserve_id = 1767225600000LL;
         info.compression_type = "ZSTD";
-        check(write_databackup_config(dbdir, info, entries, base + "/DataBackup"), "write package_restore_config.json");
+        check(write_databackup_config(dbdir, info, entries, base + "/DataBackup"),
+              "write package_restore_config.json");
         check(is_databackup_dir(dbdir), "is_databackup_dir");
 
         DbFormatInfo back;
@@ -354,7 +285,6 @@ int main() {
         check(back.uid == 10234, "config uid roundtrip");
         check(find_databackup_archive(dbdir, "apk") == apkArc, "find_databackup_archive probes suffix");
 
-        // 目录名兜底（没有 json 时）
         std::string bare = base + "/DataBackup/apps/com.bare/user_3@1700000000000";
         make_dirs(bare, 0755);
         DbFormatInfo bareInfo;
@@ -362,22 +292,25 @@ int main() {
         check(bareInfo.user == 3 && bareInfo.preserve_id == 1700000000000LL, "dir name parsed");
     }
 
-    // 恢复策略：目录映射 / 解包根 / 排除项（对齐 DataBackup PackagesRestoreUtil）
+    // ---- 恢复策略：目录映射 / 解包根 / 排除项（对齐 DataBackup PackagesRestoreUtil）----
     {
         check(policy::target_dir(kDataTypeUser, 0, "com.a") == "/data/user/0/com.a", "target_dir user");
-        check(policy::target_dir(kDataTypeUserDe, 10, "com.a") == "/data/user_de/10/com.a", "target_dir user_de");
-        check(policy::target_dir(kDataTypeData, 0, "com.a") == "/data/media/0/Android/data/com.a", "target_dir data");
-        check(policy::target_dir(kDataTypeObb, 0, "com.a") == "/data/media/0/Android/obb/com.a", "target_dir obb");
+        check(policy::target_dir(kDataTypeUserDe, 10, "com.a") == "/data/user_de/10/com.a",
+              "target_dir user_de");
+        check(policy::target_dir(kDataTypeData, 0, "com.a") == "/data/media/0/Android/data/com.a",
+              "target_dir data");
+        check(policy::target_dir(kDataTypeObb, 0, "com.a") == "/data/media/0/Android/obb/com.a",
+              "target_dir obb");
         check(policy::target_dir(kDataTypeMedia, 0, "com.a") == "/data/media/0/Android/media/com.a",
               "target_dir media");
         check(policy::target_dir(kDataTypeApk, 0, "com.a").empty(), "target_dir apk empty");
 
-        // 解包根必须是父目录：解到 dest 本身会产生 <pkg>/<pkg>/...（历史 bug）
+        // 解包根必须是父目录
         check(policy::extract_root_for("/data/user/0/com.a") == "/data/user/0", "extract_root user");
         check(policy::extract_root_for("/data/media/0/Android/data/com.a") == "/data/media/0/Android/data",
               "extract_root external");
 
-        // 实打实跑一遍：带 lib/.ota/cache/Backup_/trashed 的归档，按恢复规则解到父目录
+        // 实打实跑：含 lib/.ota/cache/Backup_/trashed 的归档，按恢复规则解到父目录并排除
         std::string rsrc = base + "/rsrc/com.demo.restore";
         std::string rpkg = "com.demo.restore";
         make_dirs(rsrc + "/files", 0755);
@@ -394,70 +327,83 @@ int main() {
         write_text(rsrc + "/no_backup/nb.bin", "nb");
         write_text(rsrc + "/Backup_2024.db", "bak");
         write_text(rsrc + "/.trashed-1700000000-p.jpg", "trash");
-        write_text(rsrc + "/.Trashed-1700000000-q.jpg", "trash2");
 
+        // 不排除地打包（保留全部），再在解包侧排除，验证 --exclude 在恢复时生效
         std::string rarc = base + "/r.tar";
         {
-            ExtractOptions rules;
-            policy::apply_restore_exclusions(kDataTypeUser, rpkg, &rules);
-            TarOptions o;
-            o.exclude_prefixes = rules.exclude_prefixes;
-            o.exclude_globs = rules.exclude_globs;
-            std::unique_ptr<Sink> sink = open_plain_sink(rarc);
-            TarStats st;
-            bool ok = tar_add_tree(*sink, rsrc, rpkg, o, &st);
-            ok = tar_write_end(*sink) && ok;
-            ok = sink->close() && ok;
-            check(ok, "restore-shaped archive built");
+            SysBackupOpt bo;
+            bo.srcDir = base + "/rsrc";
+            bo.src = rpkg;
+            bo.dst = rarc;
+            bo.compression = Compression::Plain;
+            check(sys_backup(bo) && path_exists(rarc), "restore-shaped archive built (no exclude)");
         }
         {
             std::string parent = base + "/rparent";
             make_dirs(parent + "/" + rpkg, 0755);  // 模拟 installd 已建好包目录
-            ExtractOptions eopt;
-            eopt.dest_dir = parent;                 // 关键：父目录
-            eopt.restore_owner = false;
-            policy::apply_restore_exclusions(kDataTypeUser, rpkg, &eopt);
-            std::unique_ptr<Source> s = open_plain_source(rarc);
-            ExtractStats est;
-            bool ok = s && tar_extract(*s, eopt, &est);
-            if (s) s->close();
-            check(ok, "restore-shaped extract");
-            check(path_exists(parent + "/" + rpkg + "/files/keep.txt"), "user data landed at <parent>/<pkg>/files");
+            SysRestoreOpt ro;
+            ro.src = rarc;
+            ro.dstDir = parent;  // 关键：父目录
+            policy::apply_restore_exclusions(kDataTypeUser, rpkg, &ro.excludes);
+            check(sys_restore(ro), "restore-shaped extract");
+            check(path_exists(parent + "/" + rpkg + "/files/keep.txt"),
+                  "user data landed at <parent>/<pkg>/files");
             check(!path_exists(parent + "/" + rpkg + "/" + rpkg), "no double <pkg>/<pkg> nesting");
-            check(!path_exists(parent + "/" + rpkg + "/lib/arm64/libnative.so"), "restore excludes lib (stale .so)");
+            check(!path_exists(parent + "/" + rpkg + "/lib/arm64/libnative.so"),
+                  "restore excludes lib (stale .so)");
             check(!path_exists(parent + "/" + rpkg + "/.ota/patch.bin"), "restore excludes .ota");
             check(!path_exists(parent + "/" + rpkg + "/cache/c.bin"), "restore excludes cache");
             check(!path_exists(parent + "/" + rpkg + "/code_cache/cc.bin"), "restore excludes code_cache");
             check(!path_exists(parent + "/" + rpkg + "/no_backup/nb.bin"), "restore excludes no_backup");
         }
 
-        // data 类型额外排除 Backup_* 与回收站文件（大小写）
-        {
-            ExtractOptions o;
-            policy::apply_restore_exclusions(kDataTypeData, rpkg, &o);
-            TarOptions probe;
-            probe.exclude_prefixes = o.exclude_prefixes;
-            probe.exclude_globs = o.exclude_globs;
-            check(tar_path_excluded(rpkg + "/Backup_2024.db", probe), "data excludes Backup_*");
-            check(tar_path_excluded(rpkg + "/.trashed-1-a.jpg", probe), "data excludes .trashed-*");
-            check(tar_path_excluded(rpkg + "/.Trashed-1-a.jpg", probe), "data excludes .Trashed-*");
-            check(tar_path_excluded(rpkg + "/.pending-1-a.jpg", probe), "data excludes .pending-*");
-            check(!tar_path_excluded(rpkg + "/files/keep.txt", probe), "data keeps normal files");
-
-            // user 类型不套用 Backup_*/trashed（保持与上游一致，避免误删应用自身数据）
-            ExtractOptions uo;
-            policy::apply_restore_exclusions(kDataTypeUser, rpkg, &uo);
-            TarOptions u;
-            u.exclude_prefixes = uo.exclude_prefixes;
-            u.exclude_globs = uo.exclude_globs;
-            check(!tar_path_excluded(rpkg + "/Backup_2024.db", u), "user does not exclude Backup_*");
-            check(tar_path_excluded(rpkg + "/lib/x.so", u), "user excludes lib");
+        // data 类型额外排除 Backup_*；user 类型不套用 Backup_*（保持与上游一致）
+        std::vector<std::string> dataExcl, userExcl;
+        policy::apply_restore_exclusions(kDataTypeData, rpkg, &dataExcl);
+        policy::apply_restore_exclusions(kDataTypeUser, rpkg, &userExcl);
+        bool dataHasBackup = false, userHasBackup = false;
+        for (const auto& s : dataExcl) {
+            if (s == "Backup_*") dataHasBackup = true;
         }
+        for (const auto& s : userExcl) {
+            if (s == "Backup_*") userHasBackup = true;
+        }
+        check(dataHasBackup, "data excludes Backup_*");
+        check(!userHasBackup, "user does not exclude Backup_*");
+        check(userExcl.size() == 5, "user has 5 fixed excludes");
 
-        // 干净恢复保留项
-        {
-            std::vector<std::string> keep = policy::keep_names();
-            check(keep.size() == 5, "keep_names has 5 entries");
+        std::vector<std::string> keep = policy::keep_names();
+        check(keep.size() == 5, "keep_names has 5 entries");
+    }
+
+    // ---- zstd 往返（仅当主机有 zstd 二进制；设备上必有）----
+    {
+        ExecResult has = run_shell("command -v zstd >/dev/null 2>&1");
+        if (has.code == 0) {
+            std::string zsrc = base + "/zsrc/com.demo.z";
+            make_dirs(zsrc, 0755);
+            write_text(zsrc + "/a.txt", "zstd content\n");
+            write_text(zsrc + "/b.bin", std::string(2000, 'y'));
+            std::string zst = base + "/z.tar.zst";
+            SysBackupOpt bo;
+            bo.srcDir = base + "/zsrc";
+            bo.src = "com.demo.z";
+            bo.dst = zst;
+            bo.compression = Compression::Zstd;
+            bo.level = 3;
+            check(sys_backup(bo) && file_is_zstd(zst), "sys_backup zstd");
+            check(detect_compression(zst) == Compression::Zstd, "detect_compression -> zstd");
+
+            std::string zout = base + "/zout";
+            SysRestoreOpt ro;
+            ro.src = zst;
+            ro.dstDir = zout;
+            check(sys_restore(ro) && read_all(zout + "/com.demo.z/a.txt") == "zstd content\n",
+                  "zstd content roundtrip");
+            check(run_shell("zstd -d -c '" + zst + "' 2>/dev/null | tar -tf - >/dev/null 2>&1").code == 0,
+                  "system zstd+tar can read our .tar.zst");
+        } else {
+            printf("[SKIP] system zstd CLI not present on host (device has it)\n");
         }
     }
 

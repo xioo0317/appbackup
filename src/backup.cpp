@@ -16,8 +16,7 @@
 #include "manifest.h"
 #include "proc.h"
 #include "selinux.h"
-#include "sink.h"
-#include "tar_writer.h"
+#include "sysarchive.h"
 #include "uidmap.h"
 
 namespace appbackup {
@@ -43,11 +42,11 @@ const char* ct_enum_name(Compression c) {
     }
 }
 
-// 排除项唯一来源，逐条对齐上游 PackagesBackupUtil.buildExclusionAndPrune：
+// 排除项唯一来源，逐条对齐上游 PackagesBackupUtil.backupData：
 //   USER / USER_DE：<pkg>/.ota、cache、lib、code_cache、no_backup
-//   DATA / OBB / MEDIA：<pkg>/cache + Backup_* + 回收站/写入中文件
+//   DATA / OBB / MEDIA：<pkg>/cache + Backup_*
 //   APK：无
-// 这份列表同时用于 tar 排除与 manifest 的 excl= 字段，保证两边口径一致。
+// 这份列表同时用于系统 tar 的 --exclude= 与 manifest 的 excl= 字段，保证两边口径一致。
 std::vector<std::string> build_exclusions(const std::string& type, const std::string& pkg) {
     std::vector<std::string> v;
     if (type == kDataTypeUser || type == kDataTypeUserDe) {
@@ -57,10 +56,6 @@ std::vector<std::string> build_exclusions(const std::string& type, const std::st
     } else if (type == kDataTypeData || type == kDataTypeObb || type == kDataTypeMedia) {
         v.push_back(pkg + "/cache");
         v.push_back("Backup_*");
-        v.push_back(".trashed-*");
-        v.push_back(".pending-*");
-        v.push_back(".Trashed-*");
-        v.push_back(".Pending-*");
     }
     return v;
 }
@@ -142,8 +137,17 @@ int run_backup(const BackupOptions& opt) {
         log_warn("cannot resolve uid for %s (user %d); backup will still proceed", opt.pkg.c_str(), opt.user);
     }
 
-    // 主备份目录固定为 user_<userId>（不带 @preserveId），与上游一致
-    std::string dest = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, 0);
+    // 先取展示信息（label/版本/时间），供目录命名 <label>_<pkg> 与 config 使用
+    DbFormatInfo info;
+    info.pkg = opt.pkg;
+    info.user = opt.user;
+    info.uid = uid;
+    info.preserve_id = 0;
+    info.compression_type = ct_enum_name(opt.compression);
+    fill_package_display_info(opt.pkg, opt.user, &info);
+
+    // 主备份目录固定为 user_<userId>（不带 @preserveId）；有 label 时应用目录为 <label>_<pkg>，与上游一致
+    std::string dest = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, 0, info.label);
     if (opt.preserve && path_exists(dest)) {
         long long pid = epoch_millis();
         std::string archived = databackup_version_dir(opt.out_dir, opt.pkg, opt.user, pid);
@@ -169,7 +173,6 @@ int run_backup(const BackupOptions& opt) {
 
     std::vector<DataEntry> entries;
     uint64_t total_bytes = 0;
-    uint64_t total_files = 0;
     int failed = 0;
     int skipped_unchanged = 0;
 
@@ -233,83 +236,59 @@ int run_backup(const BackupOptions& opt) {
             continue;
         }
 
-        TarOptions topt;
+        // 直接用系统 tar + zstd 打包（与上游 TarUtil/Tar.compress 指令一致，不手写）
+        SysBackupOpt sopt;
+        sopt.dst = dst;
+        sopt.compression = opt.compression;
+        sopt.level = opt.level;
         if (type == kDataTypeApk) {
-            topt.only_top_level_files = true;
-            topt.file_suffix_filter = ".apk";
-            topt.flat_root = true;
+            sopt.apk_mode = true;
+            sopt.srcDir = plan.src;  // apk 父目录
+            sopt.src = "./*.apk";    // 只取顶层 .apk，天然不含 lib/oat 等子目录
         } else {
-            for (const auto& e : plan.excl) {
-                if (e.find('*') != std::string::npos) {
-                    topt.exclude_globs.push_back(e);
-                } else {
-                    topt.exclude_prefixes.push_back(e);
-                }
-            }
+            sopt.srcDir = dirname_of(plan.src);
+            sopt.src = plan.arc;  // 包名（归档内顶层为 <pkg>/...）
+            sopt.excludes = plan.excl;
+            // 上游默认不跟随符号链接：-h 仅 readFollowSymlinks 开启，这里保持默认关
         }
 
-        // 先写 .part 再 rename：就地更新时不会因为中途失败把上一份好归档截断
-        std::string tmp = dst + ".part";
-        unlink(tmp.c_str());
-        std::unique_ptr<Sink> sink = open_sink(tmp, opt.compression, opt.level);
-        if (!sink) {
-            log_error("[%s] 无法写入 %s", type.c_str(), tmp.c_str());
-            failed++;
-            entries.push_back(entry);
-            continue;
-        }
-
-        TarStats stats;
-        bool ok = tar_add_tree(*sink, plan.src, plan.arc, topt, &stats);
-        ok = tar_write_end(*sink) && ok;
-        ok = sink->close() && ok;
-
+        uint64_t unc = 0;
+        bool ok = sys_backup(sopt, &unc);
         if (!ok) {
-            unlink(tmp.c_str());
             log_error("[%s] 归档失败: %s", type.c_str(), entry.archive.c_str());
             failed++;
             entries.push_back(entry);
             continue;
         }
-        if (rename(tmp.c_str(), dst.c_str()) != 0) {
-            log_error("[%s] rename 失败 %s: %s", type.c_str(), dst.c_str(), strerror(errno));
-            unlink(tmp.c_str());
-            failed++;
-            entries.push_back(entry);
-            continue;
-        }
 
-        entry.files = stats.files;
         entry.bytes = file_size(dst);
-        total_files += stats.files;
         total_bytes += entry.bytes;
-        log_info("[%s] %llu files, %s 源 -> %s（%s）", type.c_str(),
-                 static_cast<unsigned long long>(stats.files), human_size(stats.bytes).c_str(),
+        log_info("[%s] %s 原始 -> %s（压缩后 %s）", type.c_str(), human_size(unc).c_str(),
                  entry.archive.c_str(), human_size(entry.bytes).c_str());
 
         write_md5_sidecar(dst);
         if (!src_hash.empty()) manifest_write(dst, src_hash, params);
-        if (stats.skipped > 0) {
-            log_debug("[%s] skipped %llu entries", type.c_str(),
-                      static_cast<unsigned long long>(stats.skipped));
-        }
         entries.push_back(entry);
     }
 
-    DbFormatInfo info;
-    info.pkg = opt.pkg;
-    info.user = opt.user;
-    info.uid = uid;
-    info.preserve_id = 0;
-    info.compression_type = ct_enum_name(opt.compression);
-    fill_package_display_info(opt.pkg, opt.user, &info);
+    // 没有任何一种数据类型成功备份（如应用已卸载、源目录不存在）：给出明确错误，不写残缺 config
+    bool any_exists = false;
+    for (const auto& e : entries) {
+        if (e.exists) {
+            any_exists = true;
+            break;
+        }
+    }
+    if (!any_exists) {
+        log_error("backup %s : 没有任何数据可备份（应用是否已卸载 / 源目录不存在？）", opt.pkg.c_str());
+        return 1;
+    }
     if (!write_databackup_config(dest, info, entries, opt.out_dir)) failed++;
 
     std::string skip_note =
         skipped_unchanged > 0 ? strfmt("（%d 类未变化跳过）", skipped_unchanged) : std::string();
-    log_info("backup %s -> %s : %llu files, %s, uid=%d, %s%s", opt.pkg.c_str(), dest.c_str(),
-             static_cast<unsigned long long>(total_files), human_size(total_bytes).c_str(), uid,
-             ct_enum_name(opt.compression), skip_note.c_str());
+    log_info("backup %s -> %s : %s, uid=%d, %s%s", opt.pkg.c_str(), dest.c_str(),
+             human_size(total_bytes).c_str(), uid, ct_enum_name(opt.compression), skip_note.c_str());
     return failed == 0 ? 0 : 1;
 }
 

@@ -55,8 +55,7 @@ set(APP_SOURCES
     src/sha256.cpp
     src/fingerprint.cpp
     src/manifest.cpp
-    src/tar_writer.cpp
-    src/tar_reader.cpp
+    src/sysarchive.cpp
     src/selinux.cpp
     src/uidmap.cpp
     src/meta.cpp
@@ -75,10 +74,6 @@ if(NOT ZLIB_LIB)
     message(FATAL_ERROR "zlib not found")
 endif()
 target_link_libraries(appbackup PRIVATE ${ZLIB_LIB} dl)
-if(APP_ZSTD_OK)
-    target_link_libraries(appbackup PRIVATE appbackup_zstd)
-    target_compile_definitions(appbackup PRIVATE APP_HAS_ZSTD=1)
-endif()
 
 # Android 上额外链接 liblog（可选，拿不到也不影响）
 if(ANDROID)
@@ -103,8 +98,7 @@ if(APP_BUILD_TESTS AND NOT ANDROID)
         src/sha256.cpp
         src/fingerprint.cpp
         src/manifest.cpp
-        src/tar_writer.cpp
-        src/tar_reader.cpp
+        src/sysarchive.cpp
         src/selinux.cpp
         src/uidmap.cpp
         src/meta.cpp
@@ -113,8 +107,4 @@ if(APP_BUILD_TESTS AND NOT ANDROID)
     target_compile_options(appbackup-test PRIVATE -Wall -Wextra -O2)
     target_include_directories(appbackup-test PRIVATE src)
     target_link_libraries(appbackup-test PRIVATE ${ZLIB_LIB} dl)
-    if(APP_ZSTD_OK)
-        target_link_libraries(appbackup-test PRIVATE appbackup_zstd)
-        target_compile_definitions(appbackup-test PRIVATE APP_HAS_ZSTD=1)
-    endif()
 endif()

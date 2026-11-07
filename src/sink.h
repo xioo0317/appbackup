@@ -32,15 +32,12 @@ const char* compression_suffix(Compression c);   // "" / ".gz" / ".zst"
 
 std::unique_ptr<Sink> open_plain_sink(const std::string& path);
 std::unique_ptr<Sink> open_gzip_sink(const std::string& path, int level);
-// 未编译 zstd 时返回 nullptr（日志会说明）
-std::unique_ptr<Sink> open_zstd_sink(const std::string& path, int level);
-// 统一入口：按 Compression 选实现
+// 统一入口：按 Compression 选实现（zstd 由系统二进制 sysarchive 处理）
 std::unique_ptr<Sink> open_sink(const std::string& path, Compression c, int level = 6);
 
 std::unique_ptr<Source> open_plain_source(const std::string& path);
 std::unique_ptr<Source> open_gzip_source(const std::string& path);
-std::unique_ptr<Source> open_zstd_source(const std::string& path);
-// 统一入口：先嗅探魔数（gzip / zstd / 裸 tar），再选实现
+// 统一入口：先嗅探魔数（gzip / zstd / 裸 tar），再选实现（zstd 由系统二进制 sysarchive 处理）
 std::unique_ptr<Source> open_source_auto(const std::string& path);
 
 // 读文件头判断压缩类型

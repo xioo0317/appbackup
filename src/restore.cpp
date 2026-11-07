@@ -16,8 +16,7 @@
 #include "proc.h"
 #include "restore_policy.h"
 #include "selinux.h"
-#include "sink.h"
-#include "tar_reader.h"
+#include "sysarchive.h"
 #include "uidmap.h"
 
 namespace appbackup {
@@ -172,18 +171,15 @@ bool install_apk_from(const std::string& in_dir, const BackupMeta& meta, int use
         run_shell("rm -rf '" + tmp + "'");
         make_dirs(tmp, 0755);
 
-        ExtractOptions eopt;
-        eopt.dest_dir = tmp;
-        eopt.restore_owner = false;
-        eopt.preserve_mtime = false;
-        std::unique_ptr<Source> src = open_source_auto(archive);
-        if (!src) {
-            log_error("cannot open apk archive: %s", archive.c_str());
+        // 用系统 tar 解包（与上游 zstd -d -c | tar 一致，不手写）
+        SysRestoreOpt ropt;
+        ropt.src = archive;
+        ropt.dstDir = tmp;
+        if (!sys_restore(ropt)) {
+            log_error("cannot extract apk archive: %s", archive.c_str());
+            run_shell("rm -rf '" + tmp + "'");
             continue;
         }
-        ExtractStats st;
-        tar_extract(*src, eopt, &st);
-        src->close();
 
         std::vector<std::string> apks;
         collect_apks(tmp, &apks);
@@ -516,21 +512,14 @@ int run_restore(const RestoreOptions& opt) {
             continue;
         }
 
-        ExtractOptions eopt;
-        eopt.dest_dir = parent;
-        eopt.restore_owner = true;  // 先按归档里的 uid 写入，随后统一 chown 成新机 uid
-        eopt.preserve_mtime = true;
-        apply_restore_exclusions(e.type, pkg, &eopt);
-        std::unique_ptr<Source> src = open_source_auto(archive);
-        if (!src) {
-            log_error("[%s] cannot open %s", e.type.c_str(), archive.c_str());
-            failed++;
-            continue;
-        }
-        ExtractStats st;
-        bool ok = tar_extract(*src, eopt, &st);
-        src->close();
-        if (!ok) {
+        std::vector<std::string> excl;
+        apply_restore_exclusions(e.type, pkg, &excl);
+        SysRestoreOpt ropt;
+        ropt.src = archive;
+        ropt.dstDir = parent;
+        ropt.excludes = excl;
+        ropt.recursive_unlink = opt.clean;  // clean 恢复时与上游一致加 --recursive-unlink
+        if (!sys_restore(ropt)) {
             log_error("[%s] extract failed", e.type.c_str());
             failed++;
             continue;
@@ -587,8 +576,7 @@ int run_restore(const RestoreOptions& opt) {
             }
         }
 
-        log_info("[%s] restored %llu files (%s) -> %s", e.type.c_str(), static_cast<unsigned long long>(st.files),
-                 human_size(st.bytes).c_str(), dest.c_str());
+        log_info("[%s] restored -> %s", e.type.c_str(), dest.c_str());
     }
 
     log_info("restore finished: %s", failed == 0 ? "ok" : "with errors");

@@ -4,13 +4,11 @@
 // 目录映射与排除规则。抽成头文件是为了让主机侧测试直接验证「发布出去的就是测过的这份」，
 // 避免测试里再抄一遍规则导致两边漂移。
 
-#include <cstdio>
 #include <string>
 #include <vector>
 
 #include "fsops.h"
 #include "meta.h"
-#include "tar_reader.h"
 
 namespace appbackup {
 namespace policy {
@@ -32,18 +30,17 @@ inline std::string target_dir(const std::string& type, int user, const std::stri
 // 与 DataBackup Tar.decompress(dst = dstDir) 一致。解到 dest 本身会得到 <pkg>/<pkg>/...。
 inline std::string extract_root_for(const std::string& dest) { return dirname_of(dest); }
 
-// 恢复排除项（DataBackup PackagesRestoreUtil.restoreData）：
+// 恢复排除项（DataBackup PackagesRestoreUtil.restoreData），直接产出 --exclude= 形参：
 //   - 五类数据统一排除 <pkg>/.ota|/cache|/lib|/code_cache|/no_backup
 //     （lib 是备份机 APK 的 native 库，覆盖到新装的包上会因 ABI/版本不匹配闪退）
-//   - data/obb/media 额外排除 Backup_* 与媒体库回收站/写入中文件（大小写两种写法）
-inline void apply_restore_exclusions(const std::string& type, const std::string& pkg, ExtractOptions* opt) {
+//   - data/obb/media 额外排除 Backup_*
+inline void apply_restore_exclusions(const std::string& type, const std::string& pkg,
+                                     std::vector<std::string>* excludes) {
     for (const char* sub : {".ota", "cache", "lib", "code_cache", "no_backup"}) {
-        opt->exclude_prefixes.push_back(pkg + "/" + sub);
+        excludes->push_back(pkg + "/" + sub);
     }
     if (type == kDataTypeData || type == kDataTypeObb || type == kDataTypeMedia) {
-        for (const char* g : {"Backup_*", ".trashed-*", ".pending-*", ".Trashed-*", ".Pending-*"}) {
-            opt->exclude_globs.push_back(g);
-        }
+        excludes->push_back("Backup_*");
     }
 }
 
