@@ -238,15 +238,16 @@ int run_backup(const BackupOptions& opt) {
             continue;
         }
 
-        // 直接用系统 tar + zstd 打包（与上游 TarUtil/Tar.compress 指令一致，不手写）
+        // 用 tar + zstd 打包（指令与上游 TarUtil 一致，不手写）
         SysBackupOpt sopt;
         sopt.dst = dst;
         sopt.compression = opt.compression;
         sopt.level = opt.level;
+        bool skipped_no_apk = false;
         if (type == kDataTypeApk) {
             sopt.apk_mode = true;
-            sopt.srcDir = plan.src;  // apk 父目录
-            sopt.src = "./*.apk";    // 只取顶层 .apk，天然不含 lib/oat 等子目录
+            sopt.srcDir = plan.src;  // apk 所在目录
+            sopt.skipped = &skipped_no_apk;
         } else {
             sopt.srcDir = dirname_of(plan.src);
             sopt.src = plan.arc;  // 包名（归档内顶层为 <pkg>/...）
@@ -256,15 +257,22 @@ int run_backup(const BackupOptions& opt) {
 
         uint64_t unc = 0;
         bool ok = sys_backup(sopt, &unc);
+        if (skipped_no_apk) {
+            // 目录里没有 .apk（应用已卸载 / apk 被清）：与其他缺失类型一致，不算失败
+            entry.exists = false;
+            entries.push_back(entry);
+            continue;
+        }
         if (!ok) {
             log_error("[%s] 归档失败: %s", type.c_str(), entry.archive.c_str());
-            failed++;
+            entry.exists = false;
             entries.push_back(entry);
+            failed++;
             continue;
         }
 
         entry.bytes = file_size(dst);
-        entry.raw_bytes = unc;
+        entry.raw_bytes = unc > 0 ? unc : entry.bytes;
         total_bytes += entry.bytes;
         log_info("[%s] %s 原始 -> %s（压缩后 %s）", type.c_str(), human_size(unc).c_str(),
                  entry.archive.c_str(), human_size(entry.bytes).c_str());

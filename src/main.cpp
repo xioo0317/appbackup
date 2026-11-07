@@ -7,6 +7,7 @@
 //                       [--no-checksum] [--force-checksum]
 //   appbackup list    --in DIR
 //   appbackup info    --pkg <pkg> [--user 0]
+//   appbackup toolchain   打印实际使用的 tar / zstd 路径与能力探测结果（排障用）
 
 #include <unistd.h>
 
@@ -18,6 +19,7 @@
 #include "backup.h"
 #include "common.h"
 #include "meta.h"
+#include "toolchain.h"
 #include "restore.h"
 #include "sink.h"
 
@@ -34,6 +36,7 @@ void print_usage() {
         "  %s restore --in <备份目录> [选项]\n"
         "  %s list    --in <备份目录>\n"
         "  %s info    --pkg <包名> [--user N]\n"
+        "  %s toolchain          打印实际使用的 tar / zstd 路径与选项支持（排障用）\n"
         "\n"
         "backup 选项:\n"
         "  --pkg <name>        要打包的应用包名（必填）\n"
@@ -82,7 +85,7 @@ void print_usage() {
         "  %s restore --in /sdcard/DataBackup/apps/com.tencent.mm/user_0 --install-apk --clean\n"
         "  %s restore --in /sdcard/DataBackup --pkg com.tencent.mm --clean\n",
         kToolName, kToolVersion, kToolName, kToolName, kToolName, kToolName, kToolName, kToolName, kToolName,
-        kToolName);
+        kToolName, kToolName);
 }
 
 std::vector<std::string> parse_type_list(const std::string& raw) {
@@ -217,6 +220,11 @@ int main(int argc, char** argv) {
             return 2;
         }
         return run_list(list_dir, bopt.pkg);
+    }
+    if (cmd == "toolchain") {
+        // 排障入口：确认走的是内嵌 GNU tar 还是系统 toybox tar，以及哪些选项会降级
+        printf("%s\n", toolchain::describe().c_str());
+        return 0;
     }
     if (cmd == "info") {
         if (bopt.pkg.empty()) {

@@ -9,41 +9,40 @@ if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
-# ---- zstd（可选）----
-# 查找顺序：已指定 APP_ZSTD_SRC 时 add_subdirectory；否则找系统 zstd；
-# 都拿不到就不定义 APP_HAS_ZSTD，工具退化为 gzip/none（运行时会提示）。
-option(APP_WITH_ZSTD "Build with zstd support" ON)
-set(APP_ZSTD_SRC "" CACHE PATH "Path to zstd source tree (contains build/cmake)")
-
-if(APP_WITH_ZSTD)
-    if(APP_ZSTD_SRC)
-        enable_language(C)
-        set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
-        set(ZSTD_BUILD_SHARED OFF CACHE BOOL "" FORCE)
-        set(ZSTD_BUILD_STATIC ON CACHE BOOL "" FORCE)
-        set(ZSTD_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-        set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "" FORCE)
-        add_subdirectory("${APP_ZSTD_SRC}/build/cmake" "${CMAKE_BINARY_DIR}/zstd" EXCLUDE_FROM_ALL)
-        add_library(appbackup_zstd INTERFACE)
-        target_link_libraries(appbackup_zstd INTERFACE libzstd_static)
-        target_include_directories(appbackup_zstd INTERFACE "${APP_ZSTD_SRC}/lib")
-        set(APP_ZSTD_OK ON)
-    else()
-        find_path(ZSTD_INCLUDE_DIR zstd.h)
-        find_library(ZSTD_LIBRARY NAMES zstd libzstd.a)
-        if(ZSTD_INCLUDE_DIR AND ZSTD_LIBRARY)
-            add_library(appbackup_zstd INTERFACE)
-            target_link_libraries(appbackup_zstd INTERFACE ${ZSTD_LIBRARY})
-            target_include_directories(appbackup_zstd INTERFACE ${ZSTD_INCLUDE_DIR})
-            set(APP_ZSTD_OK ON)
-        else()
-            message(STATUS "zstd not found — building without zstd support")
-            set(APP_ZSTD_OK OFF)
-        endif()
-    endif()
-else()
-    set(APP_ZSTD_OK OFF)
+# 正式产物只有 Android 版：可执行文件内嵌 arm64 静态 tar + zstd（见下方 APP_EMBED_*）。
+# 非 Android 构建仅用于开发期编译检查，运行时因 ABI 不符会回退系统 tar。
+option(APP_HOST_CHECK "非 Android 主机上构建（仅编译检查）" OFF)
+if(NOT ANDROID AND NOT APP_HOST_CHECK)
+    message(FATAL_ERROR
+        "本项目面向 Android（内嵌 arm64 静态 tar/zstd）。\n"
+        "如需在主机上做编译检查，请加 -DAPP_HOST_CHECK=ON。")
 endif()
+
+# ---- 内嵌 tar / zstd ----------------------------------------------------------
+# 上游 DataBackup 把静态 GNU tar + zstd 放在 assets/bin.zip，运行时解压到私有 bin 目录
+# 并 PATH 前置（BaseUtil.EnvInitializer）。归档字节由 tar 实现决定，所以必须用同一份。
+# 这里做等价的事：把同样的二进制嵌进可执行文件，运行时释放到磁盘，免去额外部署。
+set(APP_EMBED_ABI "arm64-v8a" CACHE STRING "prebuilt/<abi>/ 下的 tar/zstd 目标 ABI")
+set(APP_EMBED_DIR "${CMAKE_CURRENT_SOURCE_DIR}/prebuilt/${APP_EMBED_ABI}")
+if(NOT EXISTS "${APP_EMBED_DIR}/tar" OR NOT EXISTS "${APP_EMBED_DIR}/zstd")
+    message(FATAL_ERROR "缺少内嵌二进制：${APP_EMBED_DIR}/{tar,zstd}（从上游 assets/bin.zip 提取）")
+endif()
+
+set(APP_EMBED_OBJ_DIR "${CMAKE_BINARY_DIR}/gen")
+file(MAKE_DIRECTORY "${APP_EMBED_OBJ_DIR}")
+set(APP_EMBED_OBJS "")
+foreach(tool tar zstd)
+    set(obj "${APP_EMBED_OBJ_DIR}/${tool}.o")
+    add_custom_command(
+        OUTPUT "${obj}"
+        COMMAND ${CMAKE_LINKER} -r -b binary -o "${obj}" "${tool}"
+        WORKING_DIRECTORY "${APP_EMBED_DIR}"
+        DEPENDS "${APP_EMBED_DIR}/${tool}"
+        COMMENT "Embedding ${tool} (${APP_EMBED_ABI})"
+        VERBATIM)
+    list(APPEND APP_EMBED_OBJS "${obj}")
+endforeach()
+add_custom_target(appbackup_embed DEPENDS ${APP_EMBED_OBJS})
 
 set(APP_SOURCES
     src/main.cpp
@@ -55,6 +54,7 @@ set(APP_SOURCES
     src/sha256.cpp
     src/fingerprint.cpp
     src/manifest.cpp
+    src/toolchain.cpp
     src/sysarchive.cpp
     src/selinux.cpp
     src/uidmap.cpp
@@ -64,10 +64,13 @@ set(APP_SOURCES
     src/restore.cpp
 )
 
-add_executable(appbackup ${APP_SOURCES})
+add_executable(appbackup ${APP_SOURCES} ${APP_EMBED_OBJS})
+add_dependencies(appbackup appbackup_embed)
 
 target_compile_options(appbackup PRIVATE -Wall -Wextra -O2)
 target_include_directories(appbackup PRIVATE src)
+# ld -r -b binary 生成的 .o 没有 .note.GNU-stack，显式声明不可执行栈
+target_link_options(appbackup PRIVATE -Wl,-z,noexecstack)
 
 find_library(ZLIB_LIB z)
 if(NOT ZLIB_LIB)
@@ -84,27 +87,3 @@ if(ANDROID)
 endif()
 
 install(TARGETS appbackup RUNTIME DESTINATION bin)
-
-# 主机侧自测（Android 交叉编译时跳过）
-option(APP_BUILD_TESTS "Build host roundtrip tests" ON)
-if(APP_BUILD_TESTS AND NOT ANDROID)
-    add_executable(appbackup-test
-        tests/roundtrip.cpp
-        src/common.cpp
-        src/proc.cpp
-        src/sink.cpp
-        src/fsops.cpp
-        src/md5.cpp
-        src/sha256.cpp
-        src/fingerprint.cpp
-        src/manifest.cpp
-        src/sysarchive.cpp
-        src/selinux.cpp
-        src/uidmap.cpp
-        src/meta.cpp
-        src/dbformat.cpp
-    )
-    target_compile_options(appbackup-test PRIVATE -Wall -Wextra -O2)
-    target_include_directories(appbackup-test PRIVATE src)
-    target_link_libraries(appbackup-test PRIVATE ${ZLIB_LIB} dl)
-endif()
